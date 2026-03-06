@@ -60,6 +60,7 @@ Tradeoff accepted:
   - The image contains encrypted secrets but never the decryption key.
 
 ### 4.3 Generated Runtime Outputs
+- `/etc/nftables.conf` (firewall)
 - `/etc/exports.d/cloudyhome.exports` (NFS)
 - `/etc/samba/smb.conf` (Samba)
 - `/etc/target/saveconfig.json` (iSCSI)
@@ -80,15 +81,18 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 4. `nas-render-config.service`:
    - Decrypts secrets from baked SOPS file using AGE key at `/etc/sops/age/keys.txt`.
    - Merges secret + non-secret data.
-   - Renders NFS/Samba/iSCSI/Garage/FTP configs into `/etc`.
+   - Renders firewall/NFS/Samba/iSCSI/Garage/FTP configs into `/etc`.
    - Validates generated config syntax.
    - Cleans decrypted material from `/run`.
-5. `nas-apply-config.service`:
+5. `nas-firewall.service`:
+   - Loads `/etc/nftables.conf` via `nft -f`.
+   - Firewall is active before any NAS service starts.
+6. `nas-apply-config.service`:
    - Creates missing datasets and zvols.
    - Provisions Samba users into `tdbsam`.
    - Applies/loads iSCSI config.
    - Starts/reloads NFS, Samba, iSCSI, Garage, and FTP services.
-6. `garage-bootstrap.service`:
+7. `garage-bootstrap.service`:
    - Runs after `cloudyhome-garage.service` is up.
    - Checks Garage layout via admin API; assigns and applies layout if not yet configured.
 
@@ -122,7 +126,17 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a `mktemp`-created file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Removes the temp file on exit (trap on EXIT).
 - Provisions Samba users into `tdbsam` via `smbpasswd`/`pdbedit`. Runs before `smbd.service` starts.
 
-## 6.4 `garage-bootstrap.service`
+## 6.5 `nas-firewall.service`
+- Type: `oneshot`
+- `After=nas-render-config.service`
+- `Before=nas-apply-config.service`
+- Loads `/etc/nftables.conf` via `nft -f /etc/nftables.conf`.
+- Stateful firewall: established/related connections auto-allowed.
+- Loopback traffic always permitted.
+- Default input policy: drop (as specified in `services.yml`).
+- Firewall is fully active before any NAS service starts.
+
+## 6.6 `garage-bootstrap.service`
 - Type: `oneshot`
 - `After=cloudyhome-garage.service`
 - `Wants=cloudyhome-garage.service`
@@ -193,7 +207,7 @@ Risk notes:
 
 ## 10. Firewall Port Reference
 
-All ports are on the NAS VM. Restrict source IPs at the firewall to the minimum required subnet.
+All ports are on the NAS VM. Actual rules are declared in `services.yml` (`firewall.rules`) and rendered to `/etc/nftables.conf` at boot. The table below is the reference for expected port usage; source restrictions must be explicitly configured per rule.
 
 | Port(s)       | Protocol | Service         | Source restriction              | Notes                                               |
 |---------------|----------|-----------------|---------------------------------|-----------------------------------------------------|
@@ -219,7 +233,7 @@ Build/deploy model:
 
 Deliverable scope (this project):
 - Python renderer script (`/usr/local/sbin/nas-render-config`)
-- systemd units: `zfs-import-existing.service`, `nas-render-config.service`, `nas-apply-config.service`, `garage-bootstrap.service`
+- systemd units: `zfs-import-existing.service`, `nas-render-config.service`, `nas-firewall.service`, `nas-apply-config.service`, `garage-bootstrap.service`
 - Jinja2 templates for all generated configs (NFS exports, smb.conf, iSCSI saveconfig.json, garage.toml, ftp.env, Quadlet units)
 - `services.yml` canonical example (baked into image by Packer)
 - `secrets.enc.yaml` schema example (encrypted and baked into image by Packer)
@@ -284,6 +298,7 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 ### 14.2 Top-Level Keys
 - `version` (required, integer): schema version. Initial value: `1`.
 - `storage` (required, map): pool and dataset conventions.
+- `firewall` (required, map): nftables rule definitions.
 - `nfs` (optional, map): NFS export definitions.
 - `samba` (optional, map): Samba global and share definitions.
 - `iscsi` (optional, map): iSCSI IQN and LUN mapping.
@@ -304,6 +319,38 @@ storage:
     - "/zpool0/shares"                 # file shares parent dataset
     - "/zpool0/iscsi"                  # zvol parent dataset for iSCSI LUNs
     - "/zpool0/backups"                # backup target dataset (snapshots/replication landing)
+
+firewall:
+  default_input: "drop"              # drop | accept
+  rules:
+    - service: "ssh"
+      ports: [22]
+      proto: ["tcp"]
+      sources_ref: "firewall/ssh"
+    - service: "nfs"
+      ports: [111, 2049]
+      proto: ["tcp", "udp"]
+      sources_ref: "firewall/nfs"
+    - service: "samba"
+      ports: [139, 445]
+      proto: ["tcp"]
+      sources_ref: "firewall/samba"
+    - service: "iscsi"
+      ports: [3260]
+      proto: ["tcp"]
+      sources_ref: "firewall/iscsi"
+    - service: "garage-s3"
+      ports: [3900]
+      proto: ["tcp"]
+      sources_ref: "firewall/garage-s3"
+    - service: "ftp"
+      ports: [21]
+      proto: ["tcp"]
+      sources_ref: "firewall/ftp"
+    - service: "ftp-passive"
+      port_range: [21000, 21010]     # inclusive range; maps to nftables tcp dport 21000-21010
+      proto: ["tcp"]
+      sources_ref: "firewall/ftp"
 
 nfs:
   exports:
@@ -395,6 +442,16 @@ ftp:
 
 ### 14.4 Validation Rules
 - `version` must equal `1`.
+- `firewall` is required; omitting it is a validation error.
+- `firewall.default_input` must be one of `drop` or `accept`.
+- `firewall.rules` must be a non-empty list.
+- Each rule must have `service` (non-empty string), at least one of `ports` or `port_range`, `proto` (non-empty list), and `sources_ref` (non-empty string).
+- `ports` entries must be valid port numbers (1–65535).
+- `port_range` must be a two-element list `[min, max]` where `min <= max` and both are valid port numbers.
+- `proto` entries must be one of `tcp` or `udp`.
+- `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets.
+- All resolved source IPs and CIDRs must be RFC1918 addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). Non-RFC1918 sources fail validation.
+- A rule may not define both `ports` and `port_range`.
 - `storage.pool` must be `zpool0` for this deployment.
 - `storage.datasets` must be a non-empty list of unique dataset paths.
 - Each dataset entry must start with `/zpool0/` (mount path form).
@@ -437,6 +494,13 @@ ftp:
 `secrets.enc.yaml` is keyed by reference path used in `services.yml`:
 
 ```yaml
+firewall:
+  ssh:       ["10.0.0.0/24"]
+  nfs:       ["10.0.0.0/24"]
+  samba:     ["10.0.0.0/24"]
+  iscsi:     ["10.0.0.0/24"]
+  garage-s3: ["10.0.0.0/24"]
+  ftp:       ["192.168.1.50"]
 iscsi:
   vmstore:
     chap_user: "vmstore-user"
