@@ -181,7 +181,6 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - `After=cloudyhome-nas-render.service`
 - `Requires=cloudyhome-nas-render.service`
 - `Before=cloudyhome-nas-apply.service`
-- `RuntimeDirectory=nas`
 - `WantedBy=multi-user.target`
 - Loads `/etc/nftables.conf` via `nft -f /etc/nftables.conf`.
 - Stateful firewall: established/related connections auto-allowed.
@@ -205,7 +204,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
   1. `systemctl daemon-reload` — required so systemd sees the Quadlet `.container` files rendered by `cloudyhome-nas-render.service`; must run before any Quadlet unit is started.
   2. Create missing datasets and zvols. Each `zfs create` is attempted independently; failures are logged and skipped without aborting the remaining steps.
   3. Create missing Samba OS users: for each `smb_`-prefixed user in `samba.users[]` in secrets, run `useradd --no-create-home --shell /usr/sbin/nologin <username>` if the account does not already exist. Idempotent.
-  4. Provision Samba users into `tdbsam` via `smbpasswd`/`pdbedit`.
+  4. Provision Samba users into `tdbsam` idempotently: for each user in `samba.users[]` in secrets, check existence with `pdbedit -L -u <username>` (exit 0 = already present); if absent, add via `smbpasswd -a -s <username>` with password piped to stdin; if present, update password via `smbpasswd -s <username>` (no `-a`).
   5. `systemctl reload-or-restart nfs-server.service`
   6. `systemctl reload-or-restart smbd.service`
   7. `systemctl restart target.service` (iSCSI — full restart to apply new saveconfig.json)
@@ -247,8 +246,9 @@ Core behavior:
   5. On validation failure: delete the temp file and exit non-zero. The live `/etc` file is never touched.
 - For each enabled container service (`garage`, `ftp`), also render the Quadlet `.container` file into `/etc/containers/systemd/` using the same temp-file + compare + atomic-move pattern. These files are generated from Pydantic-validated input and do not require a separate runtime validator.
 - `testparm -s` validates the Samba config; `nft -c -f <tempfile>` validates the nftables config as a dry-run before promotion to `/etc/nftables.conf`. All other outputs are trusted from Pydantic-validated input and do not require a separate runtime validator.
-- Set permissions:
-  - restrictive mode for files containing credentials.
+- Set permissions after atomic move:
+  - `0600 root:root`: `garage.toml`, `ftp.env`, `/etc/target/saveconfig.json` (contain resolved secret values)
+  - `0644 root:root`: `/etc/nftables.conf`, `/etc/exports.d/cloudyhome.exports`, `/etc/samba/smb.conf`, Quadlet `.container` files (no secret content)
 - Exit non-zero on any failed validation.
 
 Idempotency (hard requirement):
@@ -274,7 +274,7 @@ Idempotency (hard requirement):
 - NFS client CIDRs (per export)
 - Samba users/passwords
 - iSCSI CHAP credentials
-- Garage RPC/S3/admin secrets/keys
+- Garage RPC secret and admin token
 - FTP local/virtual account credentials
 
 Renderer contract:
@@ -303,8 +303,7 @@ All ports are on the NAS VM. Actual rules are declared in `services.yml` (`firew
 |---------------|----------|-----------------|---------------------------------|-----------------------------------------------------|
 | 22            | TCP      | SSH             | Admin hosts only                | VM management access                                |
 | 2049          | TCP      | NFS             | NFS client subnet               | NFSv4 only; TCP only, no UDP required               |
-| 139           | TCP      | Samba (NetBIOS) | LAN subnet                      | Legacy NetBIOS session; not needed for SMB2/3 only  |
-| 445           | TCP      | Samba (SMB)     | LAN subnet                      | Primary Samba port for SMB2/3                       |
+| 445           | TCP      | Samba (SMB)     | LAN subnet                      | SMB2/3 only; port 139 (NetBIOS) not used            |
 | 3260          | TCP      | iSCSI           | Initiator subnet only           | Both discovery and session traffic; restrict tightly to prevent target enumeration by untrusted hosts |
 | 3900          | TCP      | Garage S3       | S3 client subnet                | Garage S3-compatible object storage API             |
 | 3901          | TCP      | Garage RPC      | No rule — blocked by default-drop | Single-node: no external RPC needed; bound to host IP, no firewall rule |
@@ -440,7 +439,7 @@ firewall:
       proto: ["tcp"]
       sources_ref: "firewall/nfs"
     - service: "samba"
-      ports: [139, 445]
+      ports: [445]
       proto: ["tcp"]
       sources_ref: "firewall/samba"
     - service: "iscsi"
@@ -479,6 +478,7 @@ samba:
   global:
     workgroup: "WORKGROUP"
     server_string: "CloudyHome NAS" # optional
+    min_protocol: "SMB3_11"         # minimum SMB protocol version; validated at boot. SMB1/NetBIOS not supported.
   shares:
     - name: "media"
       path: "/zpool0/shares/media"
@@ -559,10 +559,10 @@ ftp:
 - `firewall.rules` must be a non-empty list.
 - `firewall.rules[*].service` must be unique.
 - Each rule must have `service` (non-empty string), at least one of `ports` or `port_range`, `proto` (non-empty list), and `sources_ref` (non-empty string).
-- `ports` entries must be valid port numbers in the range 1001–65535, except for well-known ports required by their protocol: SSH (22), rpcbind (111), Samba NetBIOS (139), Samba SMB (445), FTP control (21).
+- `ports` entries must be valid port numbers in the range 1001–65535, except for well-known ports required by their protocol: SSH (22), Samba SMB (445), FTP control (21).
 - `port_range` must be a two-element list `[min, max]` where `min <= max` and both values are in the range 1001–65535.
 - `proto` entries must be one of `tcp` or `udp`.
-- `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy).
+- `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy). Bare IPv4 addresses without a prefix length (e.g. `"192.168.1.50"`) are accepted and treated as `/32`; the renderer must emit them with an explicit `/32` suffix in the nftables rule.
 - A rule may not define both `ports` and `port_range`.
 - `storage.pool` must be `zpool0` for this deployment.
 - `storage.datasets` must be a non-empty map with unique keys and unique values.
@@ -582,6 +582,7 @@ ftp:
   - `no_root_squash`
   - `all_squash`
 - If `identity_map.mode=all_squash`, both `anon_uid` and `anon_gid` are required.
+- `samba.global.min_protocol` must be `"SMB3_11"`. SMB1, SMB2, and legacy NetBIOS are not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `samba.shares` must be a non-empty list when `samba` is present.
 - `samba.shares[*].name` must be unique.
 - `samba.users[*].username` in secrets must be unique.
@@ -608,13 +609,14 @@ ftp:
   - non-empty `quadlet_name`
   - non-empty `image` (Garage container image is `dxflrs/garage`; version pinning is managed in the Quadlet file, not validated here)
   - both `admin_token_ref` and `rpc_secret_ref`
-  - `admin_port` must be specified; no firewall rule is generated for it — blocked by default-drop
+  - `admin_port` must be specified and must be a valid port number in the range 1001–65535; no firewall rule is generated for it — blocked by default-drop
   - `config_dir` must be a non-empty absolute path; the renderer writes `garage.toml` into this directory and the Quadlet mounts it read-only into the container
   - `data_dir` must start with `/zpool0/`
   - `metadata_dir` must start with `/zpool0/`
   - `layout_capacity` must be non-empty.
   - `rpc_port` must be a valid port number in the range 1001–65535.
   - `s3_port` must be a valid port number in the range 1001–65535.
+  - `replication_mode` must be one of `"none"`, `"1"`, `"2"`, `"3"`.
 - `ftp.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
