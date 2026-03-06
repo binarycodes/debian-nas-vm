@@ -64,8 +64,8 @@ Tradeoff accepted:
 - `/etc/exports.d/cloudyhome.exports` (NFS)
 - `/etc/samba/smb.conf` (Samba)
 - `/etc/target/saveconfig.json` (iSCSI)
-- `/etc/cloudyhome/garage.toml` (Garage container config input)
-- `/etc/cloudyhome/ftp.env` (FTP container environment)
+- `<garage.config_dir>/garage.toml` (Garage container config input; path driven by `garage.config_dir` in `services.yml`)
+- `<ftp.config_dir>/ftp.env` (FTP container environment; path driven by `ftp.config_dir` in `services.yml`)
 - `/etc/containers/systemd/cloudyhome-garage.container` (root Quadlet)
 - `/etc/containers/systemd/cloudyhome-ftp.container` (root Quadlet)
 
@@ -74,74 +74,83 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 ## 5. Boot Workflow
 
 1. `cloud-init` finishes; AGE private key is present at `/etc/sops/age/keys.txt` (written via `write_files`).
-2. `zfs-import-existing.service`:
-   - Checks whether `zpool0` is imported.
-   - Imports `zpool0` if needed.
-3. `zfs-mount.service` mounts datasets.
-4. `nas-render-config.service`:
+2. `cloudyhome-zfs-import.service`:
+   - Checks whether `zpool0` is imported; imports it if needed.
+   - Runs `zfs mount -a` to ensure all datasets are mounted (idempotent on reboot).
+3. `cloudyhome-nas-render.service`:
    - Decrypts secrets from baked SOPS file using AGE key at `/etc/sops/age/keys.txt`.
    - Merges secret + non-secret data.
    - Renders firewall/NFS/Samba/iSCSI/Garage/FTP configs into `/etc`.
    - Validates generated config syntax.
    - Decrypted material cleaned from `/run` automatically via `trap on EXIT`.
-5. `nas-firewall.service`:
+4. `cloudyhome-nas-firewall.service`:
    - Loads `/etc/nftables.conf` via `nft -f`.
    - Firewall is active before any NAS service starts.
-6. `nas-apply-config.service`:
+5. `cloudyhome-nas-apply.service`:
    - Creates missing datasets and zvols.
    - Provisions Samba users into `tdbsam`.
    - Applies/loads iSCSI config.
    - Starts/reloads NFS, Samba, iSCSI, Garage, and FTP services.
-7. `garage-bootstrap.service`:
+6. `cloudyhome-garage-bootstrap.service`:
    - Runs after `cloudyhome-garage.service` is up.
    - Checks Garage layout via admin API; assigns and applies layout if not yet configured.
 
 ## 6. Systemd Design
 
-## 6.1 `zfs-import-existing.service`
+## 6.1 `cloudyhome-zfs-import.service`
 - Type: `oneshot`
-- Purpose: import existing `zpool0` if not already imported.
-- Order: before `zfs-mount.service`.
-- If the pool is already imported: no-op.
-- If the pool is found and importable: import it.
+- `After=sysinit.target`
+- `WantedBy=multi-user.target`
+- Purpose: import `zpool0` if not already imported, then mount all datasets.
+- The stock ZFS import services (`zfs-import-cache.service`, `zfs-import-scan.service`, `zfs-mount.service`, `zfs-share.service`) are masked in the Packer image. `cloudyhome-zfs-import.service` is the sole ZFS bootstrap mechanism.
+- If the pool is already imported: skip import, run `zfs mount -a` only.
+- If the pool is found and importable: import it (which auto-mounts via ZFS mountpoint properties), then run `zfs mount -a` to catch any unmounted datasets.
 - If the pool is not found: exit cleanly. Pool creation is a manual, out-of-band operation — never attempted here. Downstream services that require ZFS paths will fail naturally if the pool is absent.
 
-## 6.2 `nas-render-config.service`
+## 6.2 `cloudyhome-nas-render.service`
 - Type: `oneshot`
-- `After=cloud-init.target zfs-mount.service`
+- `After=cloud-init.target cloudyhome-zfs-import.service`
+- `WantedBy=multi-user.target`
+- `RuntimeDirectory=nas` — systemd creates `/run/nas/` before the script starts and removes it after exit. Required for `flock /run/nas/render.lock`.
 - Runs `/usr/local/sbin/nas-render-config`.
 
-## 6.3 `nas-firewall.service`
+## 6.3 `cloudyhome-nas-firewall.service`
 - Type: `oneshot`
-- `After=nas-render-config.service`
-- `Before=nas-apply-config.service`
+- `After=cloudyhome-nas-render.service`
+- `Before=cloudyhome-nas-apply.service`
+- `WantedBy=multi-user.target`
 - Loads `/etc/nftables.conf` via `nft -f /etc/nftables.conf`.
 - Stateful firewall: established/related connections auto-allowed.
 - Loopback traffic always permitted.
 - Default input policy: drop (as specified in `services.yml`).
 - Firewall is fully active before any NAS service starts.
 
-## 6.4 `nas-apply-config.service`
+## 6.4 `cloudyhome-nas-apply.service`
 - Type: `oneshot`
-- `After=nas-render-config.service nas-firewall.service`
+- `After=cloudyhome-nas-render.service cloudyhome-nas-firewall.service`
+- `WantedBy=multi-user.target`
 - Performs apply/reload behavior via explicit `systemctl start` and `systemctl reload-or-restart` calls — not via `Wants=` or `Before=` dependencies.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a `mktemp`-created file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Removes the temp file on exit (trap on EXIT).
 - Service interaction order:
-  1. Create missing datasets and zvols.
-  2. Provision Samba users into `tdbsam` via `smbpasswd`/`pdbedit`.
-  3. `systemctl reload-or-restart nfs-server.service`
-  4. `systemctl reload-or-restart smbd.service`
-  5. `systemctl restart target.service` (iSCSI — full restart to apply new saveconfig.json)
-  6. `systemctl start cloudyhome-garage.service`
-  7. `systemctl start cloudyhome-ftp.service`
+  1. `systemctl daemon-reload` — required so systemd sees the Quadlet `.container` files rendered by `cloudyhome-nas-render.service`; must run before any Quadlet unit is started.
+  2. Create missing datasets and zvols.
+  3. Create missing Samba OS users: for each `smb_`-prefixed user in `samba.users[]` in secrets, run `useradd --no-create-home --shell /usr/sbin/nologin <username>` if the account does not already exist. Idempotent.
+  4. Provision Samba users into `tdbsam` via `smbpasswd`/`pdbedit`.
+  5. `systemctl reload-or-restart nfs-server.service`
+  6. `systemctl reload-or-restart smbd.service`
+  7. `systemctl restart target.service` (iSCSI — full restart to apply new saveconfig.json)
+  8. `systemctl start cloudyhome-garage.service`
+  9. `systemctl start cloudyhome-ftp.service`
+  10. `systemctl start cloudyhome-garage-bootstrap.service` — explicit trigger; consistent with the design of driving all startup from this service.
 
-## 6.5 `garage-bootstrap.service`
+## 6.5 `cloudyhome-garage-bootstrap.service`
 - Type: `oneshot`
 - `After=cloudyhome-garage.service`
 - `Wants=cloudyhome-garage.service`
 - Purpose: idempotent Garage layout assignment.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a `mktemp`-created file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Removes the temp file on exit (trap on EXIT).
 - All `garage` CLI calls are executed via `podman exec cloudyhome-garage garage ...` — no host-side Garage binary required.
+- **Readiness wait**: before any API call, polls `GET /v1/layout` in a loop (up to 30 attempts, 1s sleep between each). Exits non-zero if Garage does not become ready within the timeout. This handles the gap between the container process starting and the Garage HTTP server accepting requests.
 - Obtains the local node ID via `podman exec cloudyhome-garage garage node id`.
 - Queries the Garage admin API (`GET /v1/layout`); if the current layout has no roles assigned, runs:
   1. `podman exec cloudyhome-garage garage layout assign -z garage -c <capacity> <node-id>`
@@ -156,11 +165,15 @@ Core behavior:
 - Acquire lock (`flock /run/nas/render.lock`) to avoid concurrent runs.
 - Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a `mktemp`-created file under `/run` using SOPS with AGE key at `/etc/sops/age/keys.txt`. Remove the temp file on exit (trap on EXIT).
 - Merge `/var/lib/cloudyhome/nas/services.yml` + decrypted secrets.
-- Render target files into `/etc` with temp-file + atomic move.
+- Render target files with temp-file + validate + atomic move. Order matters:
+  1. `mkdir -p` the destination directory before writing any file. Idempotent; handles first boot where directories under `/etc/cloudyhome/` may not yet exist.
+  2. Write output to a temp file (e.g. `mktemp /run/nas/smb.conf.XXXXXX`).
+  3. Run validation against the temp file (e.g. `testparm -s <tempfile>`).
+  4. Only on validation success: `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path.
+  5. On validation failure: delete the temp file and exit non-zero. The live `/etc` file is never touched.
+- `testparm -s` is the only runtime validator needed; all other outputs are generated from Pydantic-validated input and trusted programmatically.
 - Set permissions:
   - restrictive mode for files containing credentials.
-- Validate:
-  - `testparm -s` (Samba) — only runtime validation needed; all other outputs are generated from Pydantic-validated input and trusted programmatically.
 - Exit non-zero on any failed validation.
 
 Idempotency (hard requirement):
@@ -235,7 +248,7 @@ Build/deploy model:
 
 Deliverable scope (this project):
 - Python renderer script (`/usr/local/sbin/nas-render-config`)
-- systemd units: `zfs-import-existing.service`, `nas-render-config.service`, `nas-firewall.service`, `nas-apply-config.service`, `garage-bootstrap.service`
+- systemd units: `cloudyhome-zfs-import.service`, `cloudyhome-nas-render.service`, `cloudyhome-nas-firewall.service`, `cloudyhome-nas-apply.service`, `cloudyhome-garage-bootstrap.service`
 - Jinja2 templates for all generated configs (NFS exports, smb.conf, iSCSI saveconfig.json, garage.toml, ftp.env, Quadlet units)
 - `services.yml` canonical example (baked into image by Packer)
 - `secrets.enc.yaml` schema example (encrypted and baked into image by Packer)
@@ -281,11 +294,13 @@ Recovery drill target:
 - **NFS and Samba run as host services** (`nfs-kernel-server`, `smbd`), not containers. NFS is a kernel subsystem; containerizing it provides no isolation benefit and adds significant complexity. Samba follows the same decision for consistency. The VM is the isolation boundary. Garage and FTP remain containerized as Podman Quadlets.
 
 ### 13.2 Dataset and zvol Creation
-During `nas-apply-config.service`:
+During `cloudyhome-nas-apply.service`:
 - **Datasets**: created if missing using `zfs create -p <path>`. Parent datasets created automatically. Existing datasets left untouched. All dataset paths use the mount path form (e.g. `/zpool0/shares/media`).
 - **zvols** (iSCSI LUNs): created if missing using `zfs create -V <size> <path>`. Existing zvols left untouched (size is not modified). Path uses dataset name form (e.g. `zpool0/iscsi/vmstore`); block device is derived as `/dev/zvol/<path>`.
 
 ## 14. Finalized `services.yml` Structure
+
+> **Note**: All field values, IPs, paths, usernames, ports, and secrets shown in this section are illustrative examples used to define the schema and contract. They are not the actual values the deployed system will use. Real values are supplied at deploy time via the actual `services.yml` and `secrets.enc.yaml` baked into the image.
 
 This section defines the canonical non-secret schema to be baked into:
 - `/var/lib/cloudyhome/nas/services.yml`
@@ -320,9 +335,14 @@ host_ip_ref: "host/ip"              # resolves to the NAS VM's LAN IP from secre
 
 storage:
   pool: "zpool0"
-  datasets:                            # canonical inventory for validation; can include currently unused datasets
-    - "/zpool0/system"                 # NAS system/state datasets
+  datasets:                            # canonical inventory; created by cloudyhome-nas-apply.service if missing (zfs create -p)
+    - "/zpool0/system"                 # NAS system/state parent dataset
+    - "/zpool0/system/garage"          # Garage state parent dataset
+    - "/zpool0/system/garage/data"     # Garage data directory (bind-mounted into container)
+    - "/zpool0/system/garage/meta"     # Garage metadata directory (bind-mounted into container)
     - "/zpool0/shares"                 # file shares parent dataset
+    - "/zpool0/shares/media"           # shared media (NFS + Samba)
+    - "/zpool0/shares/scanner-inbox"   # FTP upload root
     - "/zpool0/iscsi"                  # zvol parent dataset for iSCSI LUNs
     - "/zpool0/backups"                # backup target dataset (snapshots/replication landing)
 
@@ -383,7 +403,7 @@ samba:
       browsable: true
       read_only: false
       guest_ok: false
-      users_ref: ["alice"]                  # usernames from samba.users[] in secrets; maps to valid_users in smb.conf
+      users_ref: ["smb_alice"]                  # usernames from samba.users[] in secrets; maps to valid_users in smb.conf
       write_list: []                        # optional
       force_user: ""                        # optional
       force_group: ""                       # optional
@@ -421,6 +441,7 @@ garage:
   admin_port: 3903                      # bind IP resolved from host_ip_ref; no firewall rule = blocked by default-drop
   s3_region: "garage"
   replication_mode: "none"              # single-node default
+  config_dir: "/etc/cloudyhome/garage"  # host directory for rendered garage.toml; mounted read-only into container
   data_dir: "/zpool0/system/garage/data"
   metadata_dir: "/zpool0/system/garage/meta"
   layout_capacity: "1G"                 # capacity string passed to `garage layout assign`
@@ -432,6 +453,7 @@ ftp:
   runtime: "podman-quadlet-root"
   quadlet_name: "cloudyhome-ftp"
   image: "delfer/alpine-ftp-server:latest"
+  config_dir: "/etc/cloudyhome/ftp"     # host directory for rendered ftp.env; mounted into container
   # bind address resolved from top-level host_ip_ref; maps to ADDRESS env
   control_port: 21
   passive_ports:
@@ -476,6 +498,7 @@ ftp:
 - If `identity_map.mode=all_squash`, both `anon_uid` and `anon_gid` are required.
 - `samba.shares[*].name` must be unique.
 - `samba.shares[*].users_ref` must be a non-empty list of usernames. Every entry must exist in `samba.users[*].username` in secrets. Unresolved usernames fail closed.
+- All Samba usernames (in both `users_ref` lists and `samba.users[*].username` in secrets) must be prefixed with `smb_`. This ensures Samba system accounts are clearly namespaced and cannot collide with other OS users.
 - `iscsi.targets[*].name` must be unique.
 - `iscsi.targets[*].luns[*].lun` must be unique per target.
 - `iscsi.targets[*].initiators` defaults to deny-all when empty. The renderer must not allow implicit open access — an empty list is valid and means no initiator is permitted.
@@ -487,9 +510,13 @@ ftp:
   - non-empty `image` (Garage container image is `dxflrs/garage`; version pinning is managed in the Quadlet file, not validated here)
   - both `admin_token_ref` and `rpc_secret_ref`
   - `admin_port` must be specified; no firewall rule is generated for it — blocked by default-drop
+  - `config_dir` must be a non-empty absolute path; the renderer writes `garage.toml` into this directory and the Quadlet mounts it read-only into the container
+  - `data_dir` must start with `/zpool0/`
+  - `metadata_dir` must start with `/zpool0/`
 - `ftp.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
+  - `config_dir` must be a non-empty absolute path; the renderer writes `ftp.env` into this directory and the Quadlet mounts it into the container
   - non-empty `image` (FTP container image is `delfer/alpine-ftp-server`; version pinning is managed in the Quadlet file, not validated here)
   - `control_port=21` unless explicitly overridden
   - valid passive range (`passive_ports.min <= passive_ports.max`)
@@ -522,8 +549,10 @@ garage:
   rpc_secret: "REDACTED"
 samba:
   users:
-    - username: "alice"
+    - username: "smb_alice"
       password: "REDACTED"
+# Note: Samba usernames must be prefixed with smb_ (e.g. smb_alice). The apply service creates
+# the corresponding Unix system account before provisioning into tdbsam.
 ftp:
   users:
     - username: "scanner1"
@@ -540,4 +569,4 @@ Rules:
 Samba user mapping:
 - Each share's `users_ref` is a list of usernames. The renderer validates each against `samba.users[*].username` in secrets and renders them as `valid_users` in `smb.conf`.
 - Different shares may list different subsets of users for per-share access control.
-- User provisioning (writing to `tdbsam`) is handled in `nas-apply-config.service`.
+- User provisioning (writing to `tdbsam`) is handled in `cloudyhome-nas-apply.service`.
