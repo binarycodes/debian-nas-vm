@@ -32,6 +32,16 @@
   - [14.3 Canonical Schema (Field Contract)](#143-canonical-schema-field-contract)
   - [14.4 Validation Rules](#144-validation-rules)
   - [14.5 Secrets Mapping Contract](#145-secrets-mapping-contract)
+- [15. Monitoring and Storage Health](#15-monitoring-and-storage-health)
+  - [15.1 Overview](#151-overview)
+  - [15.2 ZFS Scrub Schedule](#152-zfs-scrub-schedule)
+  - [15.3 SMART Test Schedules](#153-smart-test-schedules)
+  - [15.4 ZFS Event Daemon (ZED)](#154-zfs-event-daemon-zed)
+  - [15.5 Alert Delivery](#155-alert-delivery)
+  - [15.6 Alert Script](#156-alert-script)
+  - [15.7 Render and Validation Integration](#157-render-and-validation-integration)
+  - [15.8 Packer Image Requirements](#158-packer-image-requirements)
+  - [15.9 Open Decisions](#159-open-decisions)
 
 ---
 
@@ -81,7 +91,7 @@ Tradeoff accepted:
   - Minimal configuration, stable updates.
   - VM disk passthrough by `/dev/disk/by-id/*` for all 6 SATA disks.
 - Debian NAS VM:
-  - Includes ZFS, NFS, Samba, iSCSI tooling, Podman, cloud-init, sops, age, yq, nftables, Python 3.
+  - Includes ZFS, NFS, Samba, iSCSI tooling, Podman, cloud-init, sops, age, yq, nftables, Python 3, smartmontools, zfs-zed, msmtp.
   - Includes bootstrap scripts and systemd units.
 
 ### 4.2 Configuration Inputs
@@ -103,6 +113,9 @@ Tradeoff accepted:
 - `<ftp.config_dir>/ftp.env` (FTP container environment; path driven by `ftp.config_dir` in `services.yml`)
 - `/etc/containers/systemd/cloudyhome-garage.container` (root Quadlet)
 - `/etc/containers/systemd/cloudyhome-ftp.container` (root Quadlet)
+- `/etc/cloudyhome/health/alert.conf` (alert script config)
+- `/etc/msmtprc` (SMTP relay config; only when `health.alert.enabled=true`)
+- `/etc/cloudyhome/nas-apply-services.sh` (rendered service lifecycle script; contains only systemctl commands for services present in `services.yml`)
 
 All outputs are generated atomically from template + decrypted secrets at boot.
 
@@ -116,11 +129,12 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 3. `cloudyhome-zfs-import.service`:
    - Verifies all disk IDs from `secrets.enc.yaml` are present under `/dev/disk/by-id/`; aborts with error if any are missing.
    - Checks whether `zpool0` is imported; imports it if needed.
+   - If the pool is not found or cannot be imported, exits non-zero — the entire boot chain stops here.
    - Runs `zfs mount -a` to ensure all datasets are mounted (idempotent on reboot).
 4. `cloudyhome-nas-render.service`:
    - Decrypts secrets from baked SOPS file using AGE key at `/etc/sops/age/keys.txt`.
    - Merges secret + non-secret data.
-   - Renders firewall/NFS/Samba/iSCSI/Garage/FTP configs into `/etc`.
+   - Renders firewall/NFS/Samba/iSCSI/Garage/FTP/health alert configs into `/etc`.
    - Validates generated config syntax.
    - Decrypted material cleaned from `/run` automatically on exit (guaranteed cleanup regardless of success or failure).
 5. `cloudyhome-nas-firewall.service`:
@@ -128,16 +142,15 @@ All outputs are generated atomically from template + decrypted secrets at boot.
    - Firewall is active before any NAS service starts.
 6. `cloudyhome-nas-apply.service`:
    - Creates missing datasets and zvols.
-   - Provisions Samba users into `tdbsam`.
-   - Applies/loads iSCSI config.
-   - Starts/reloads NFS, Samba, iSCSI, Garage, and FTP services.
+   - Provisions Samba users into `tdbsam` (only if `samba` is configured).
+   - Runs `/etc/cloudyhome/nas-apply-services.sh` — a rendered script that only contains service start/reload commands for services present in `services.yml`.
 7. `cloudyhome-garage-bootstrap.service`:
    - Runs after `cloudyhome-garage.service` is up.
    - Checks Garage layout via admin API; assigns and applies layout if not yet configured.
 
 ## 6. Systemd Design
 
-## 6.1 `cloudyhome-nas-validate.service`
+### 6.1 `cloudyhome-nas-validate.service`
 - Type: `oneshot`
 - `After=cloud-init.target`
 - `Requires=cloud-init.target`
@@ -152,7 +165,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Emits a clear log message for every validation failure before exiting non-zero.
 - On success, exits 0 and produces no output beyond a single confirmation log line.
 
-## 6.2 `cloudyhome-zfs-import.service`
+### 6.2 `cloudyhome-zfs-import.service`
 - Type: `oneshot`
 - `After=sysinit.target cloudyhome-nas-validate.service`
 - `Requires=cloudyhome-nas-validate.service`
@@ -165,18 +178,18 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - **Disk presence check** (runs first, before any ZFS operation): decrypts `secrets.enc.yaml` and reads `disks.ids[]`. For each entry, verifies that `/dev/disk/by-id/<id>` exists. If any disk is absent, logs the missing IDs and exits non-zero immediately. This catches VM disk passthrough misconfiguration before touching ZFS.
 - If the pool is already imported: skip import, run `zfs mount -a` only.
 - If the pool is found and importable: import it (which auto-mounts via ZFS mountpoint properties), then run `zfs mount -a` to catch any unmounted datasets.
-- If the pool is not found: exit cleanly. Pool creation is a manual, out-of-band operation — never attempted here. Downstream services that require ZFS paths will fail naturally if the pool is absent.
+- If the pool is not found: exit non-zero. Pool creation is a manual, out-of-band operation — never attempted here. A missing pool is a fatal error because all downstream services depend on ZFS datasets. The boot chain stops at this point.
 
-## 6.3 `cloudyhome-nas-render.service`
+### 6.3 `cloudyhome-nas-render.service`
 - Type: `oneshot`
 - `After=cloudyhome-nas-validate.service cloudyhome-zfs-import.service`
-- `Requires=cloudyhome-nas-validate.service`
+- `Requires=cloudyhome-nas-validate.service cloudyhome-zfs-import.service`
 - `WantedBy=multi-user.target`
 - `RuntimeDirectory=nas` — systemd creates `/run/nas/` before the script starts and removes it after exit. Required for `flock /run/nas/render.lock`.
 - `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
 - Runs `/usr/local/sbin/nas-render-config`.
 
-## 6.4 `cloudyhome-nas-firewall.service`
+### 6.4 `cloudyhome-nas-firewall.service`
 - Type: `oneshot`
 - `After=cloudyhome-nas-render.service`
 - `Requires=cloudyhome-nas-render.service`
@@ -188,10 +201,10 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Default input policy: drop (as specified in `services.yml`).
 - Firewall is fully active before any NAS service starts.
 
-## 6.5 `cloudyhome-nas-apply.service`
+### 6.5 `cloudyhome-nas-apply.service`
 - Type: `oneshot`
 - `After=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service`
-- `Requires=cloudyhome-nas-render.service cloudyhome-nas-firewall.service`
+- `Requires=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service`
 - `RuntimeDirectory=nas`
 - `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
 - `WantedBy=multi-user.target`
@@ -199,26 +212,34 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Acquires lock (`flock /run/nas/apply.lock`) to avoid concurrent runs.
 - Performs apply/reload behavior via explicit `systemctl start` and `systemctl reload-or-restart` calls — not via `Wants=` or `Before=` dependencies.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
-- **ZFS dependency note**: `cloudyhome-zfs-import.service` exits 0 whether or not the pool was found (pool creation is always out-of-band). `Requires=` is therefore not used — it would be satisfied regardless of pool state. `After=` is used to guarantee ordering only. Steps 1 and 3–10 below are safe to run without ZFS. Step 2 requires ZFS and will log errors and skip individual dataset/zvol entries that fail; it must not abort the entire service. Downstream services that depend on ZFS paths will fail naturally if the pool is absent.
-- Service interaction order:
-  1. `systemctl daemon-reload` — required so systemd sees the Quadlet `.container` files rendered by `cloudyhome-nas-render.service`; must run before any Quadlet unit is started.
-  2. Create missing datasets and zvols. Each `zfs create` is attempted independently; failures are logged and skipped without aborting the remaining steps.
-  3. Create missing Samba OS users: for each `smb_`-prefixed user in `samba.users[]` in secrets, run `useradd --no-create-home --shell /usr/sbin/nologin <username>` if the account does not already exist. Idempotent.
-  4. Provision Samba users into `tdbsam` idempotently: for each user in `samba.users[]` in secrets, check existence with `pdbedit -L -u <username>` (exit 0 = already present); if absent, add via `smbpasswd -a -s <username>` with password piped to stdin; if present, update password via `smbpasswd -s <username>` (no `-a`).
-  5. `systemctl reload-or-restart nfs-server.service`
-  6. `systemctl reload-or-restart smbd.service`
-  7. `systemctl restart target.service` (iSCSI — full restart to apply new saveconfig.json)
-  8. `systemctl start cloudyhome-garage.service`
-  9. `systemctl start cloudyhome-ftp.service`
-  10. `systemctl start cloudyhome-garage-bootstrap.service` — explicit trigger; consistent with the design of driving all startup from this service.
+- Apply sequence:
+  1. `systemctl daemon-reload` — required so systemd sees the Quadlet `.container` files rendered by `cloudyhome-nas-render.service`; must run before any Quadlet unit is started. Always runs.
+  2. Create missing datasets and zvols. Each `zfs create` is attempted independently; failures are logged and skipped without aborting the remaining steps. Always runs.
+  3. If `samba` is present in `services.yml`: create missing Samba OS users — for each `smb_`-prefixed user in `samba.users[]` in secrets, run `useradd --no-create-home --shell /usr/sbin/nologin <username>` if the account does not already exist. Idempotent.
+  4. If `samba` is present in `services.yml`: provision Samba users into `tdbsam` idempotently — for each user in `samba.users[]` in secrets, check existence with `pdbedit -L -u <username>` (exit 0 = already present); if absent, add via `smbpasswd -a -s <username>` with password piped to stdin; if present, update password via `smbpasswd -s <username>` (no `-a`).
+  5. Run `/etc/cloudyhome/nas-apply-services.sh` — the rendered service lifecycle script. This script contains only the systemctl commands for services present in `services.yml` (see below). Always runs; the script itself is the conditional gate.
 
-## 6.6 `cloudyhome-garage-bootstrap.service`
+**`/etc/cloudyhome/nas-apply-services.sh`** — rendered by `cloudyhome-nas-render.service`:
+- Generated from `services.yml` based on which optional service keys (`nfs`, `samba`, `iscsi`, `garage`, `ftp`) are present.
+- Contains no secrets — only `systemctl` commands and the garage bootstrap trigger.
+- Permissions: `0755 root:root`.
+- The renderer includes a line only when the corresponding key is present in `services.yml`:
+  - `nfs` → `systemctl reload-or-restart nfs-server.service`
+  - `samba` → `systemctl reload-or-restart smbd.service`
+  - `iscsi` → `systemctl restart target.service`
+  - `garage` → `systemctl start cloudyhome-garage.service`
+  - `ftp` → `systemctl start cloudyhome-ftp.service`
+  - `garage` → `systemctl start cloudyhome-garage-bootstrap.service` (after garage start)
+- Rendered using the same temp-file + compare + atomic-move pattern as all other config files.
+- If no optional services are present (validation prevents this — Section 14.2), the script is an empty no-op.
+
+### 6.6 `cloudyhome-garage-bootstrap.service`
 - Type: `oneshot`
 - `After=cloudyhome-garage.service`
 - `Wants=cloudyhome-garage.service`
 - `RuntimeDirectory=nas`
 - `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
-- No `WantedBy=` — intentionally omitted. This service is not auto-started by systemd; it is driven exclusively by `cloudyhome-nas-apply.service` via `systemctl start cloudyhome-garage-bootstrap.service` (step 10 of Section 6.5).
+- No `WantedBy=` — intentionally omitted. This service is not auto-started by systemd; it is driven exclusively by `cloudyhome-nas-apply.service` via the rendered `nas-apply-services.sh` script (Section 6.5).
 - Runs `/usr/local/sbin/nas-garage-bootstrap` (Python).
 - Purpose: idempotent Garage layout assignment.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
@@ -239,16 +260,17 @@ Core behavior:
 - Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using SOPS. The environment variable `SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` must be set before invoking `sops` (provided via `Environment=` in the systemd unit; shell scripts must also export it explicitly). Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
 - Merge `/var/lib/cloudyhome/nas/services.yml` + decrypted secrets.
 - Render target files with temp-file + validate + atomic move. Order matters:
-  1. `mkdir -p` the destination directory for every output file before writing. Idempotent; applies to all render targets as several destination directories do not pre-exist on a fresh Debian image: `/etc/exports.d/`, `/etc/target/`, `/etc/containers/systemd/`, and all `config_dir` paths under `/etc/cloudyhome/`.
+  1. `mkdir -p` the destination directory for every output file before writing. Idempotent; applies to all render targets as several destination directories do not pre-exist on a fresh Debian image: `/etc/exports.d/`, `/etc/target/`, `/etc/containers/systemd/`, `/etc/cloudyhome/health/`, and all `config_dir` paths under `/etc/cloudyhome/`.
   2. Write output to a temp file in `/run/nas/`.
   3. Run validation against the temp file (e.g. `testparm -s <tempfile>`).
   4. Only on validation success: compare the temp file against the existing destination using `filecmp.cmp(tmp, dest, shallow=False)` (Python) or `cmp -s` (shell). If the content is identical, discard the temp file. If different (or the destination does not yet exist), `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path.
   5. On validation failure: delete the temp file and exit non-zero. The live `/etc` file is never touched.
 - For each enabled container service (`garage`, `ftp`), also render the Quadlet `.container` file into `/etc/containers/systemd/` using the same temp-file + compare + atomic-move pattern. These files are generated from Pydantic-validated input and do not require a separate runtime validator.
 - `testparm -s` validates the Samba config; `nft -c -f <tempfile>` validates the nftables config as a dry-run before promotion to `/etc/nftables.conf`. All other outputs are trusted from Pydantic-validated input and do not require a separate runtime validator.
-- Set permissions after atomic move:
-  - `0600 root:root`: `garage.toml`, `ftp.env`, `/etc/target/saveconfig.json` (contain resolved secret values)
-  - `0644 root:root`: `/etc/nftables.conf`, `/etc/exports.d/cloudyhome.exports`, `/etc/samba/smb.conf`, Quadlet `.container` files (no secret content)
+- Permissions are set on the temp file before the atomic move (step 4 above); `mv` preserves them:
+  - `0600 root:root`: `garage.toml`, `ftp.env`, `/etc/target/saveconfig.json`, `/etc/msmtprc` (contain resolved secret values)
+  - `0755 root:root`: `/etc/cloudyhome/nas-apply-services.sh` (rendered script, no secret content)
+  - `0644 root:root`: `/etc/nftables.conf`, `/etc/exports.d/cloudyhome.exports`, `/etc/samba/smb.conf`, Quadlet `.container` files, `/etc/cloudyhome/health/alert.conf` (no secret content)
 - Exit non-zero on any failed validation.
 
 Idempotency (hard requirement):
@@ -266,6 +288,7 @@ Idempotency (hard requirement):
 - iSCSI target/LUN mapping
 - Garage network and non-secret parameters
 - FTP listeners, passive port range, and upload policy
+- Health alert settings (SMTP host, port, TLS mode, addresses)
 
 `secrets.enc.yaml` defines sensitive values:
 - Disk IDs for passthrough verification (`disks/ids`)
@@ -276,6 +299,7 @@ Idempotency (hard requirement):
 - iSCSI CHAP credentials
 - Garage RPC secret and admin token
 - FTP local/virtual account credentials
+- SMTP relay credentials (health alerting)
 
 Renderer contract:
 - Strict schema validation before writing `/etc`.
@@ -287,7 +311,7 @@ Controls:
 - AGE private key delivered via cloud-init `write_files` — never in process args, environment, or shell history.
 - Any service that needs secrets decrypts independently: SOPS → temp file under `/run` (tmpfs) → use → guaranteed cleanup on exit. No service depends on another's decryption output.
 - Decrypted temp files exist only for the lifetime of the process that created them; removed unconditionally on exit.
-- Restrictive ownership and modes on generated `/etc` files.
+- Restrictive ownership and modes on generated `/etc` files (files containing resolved secrets — `garage.toml`, `ftp.env`, `saveconfig.json`, `msmtprc` — are `0600 root:root`).
 - Journald/logging avoids printing secret values.
 
 Risk notes:
@@ -321,12 +345,15 @@ Build/deploy model:
 
 Deliverable scope (this project):
 - Python validate script (`/usr/local/sbin/nas-validate-config`) — decrypts secrets, runs full schema validation against `services.yml` + `secrets.enc.yaml`, exits non-zero with clear error messages on any failure
-- Shell ZFS import script (`/usr/local/sbin/nas-zfs-import`) — decrypts secrets via `sops -d` (requires `export SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` at the top of the script) and extracts `disks.ids[]` using `yq` for the disk presence check; implements three-case ZFS import logic (already imported / importable / not found)
+- Shell ZFS import script (`/usr/local/sbin/nas-zfs-import`) — decrypts secrets via `sops -d` (requires `export SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` at the top of the script) and extracts `disks.ids[]` using `yq` for the disk presence check; implements ZFS import logic (already imported / importable / not found — fatal error)
 - Python renderer script (`/usr/local/sbin/nas-render-config`) — reads `services.yml` + decrypted secrets, validates, renders all configs into `/etc`
 - Python apply script (`/usr/local/sbin/nas-apply-config`) — reads `services.yml` + decrypted secrets, creates datasets/zvols, provisions OS users and `tdbsam`, manages service lifecycle; Python for consistent YAML parsing with the renderer
 - Python bootstrap script (`/usr/local/sbin/nas-garage-bootstrap`) — reads `services.yml` + decrypted secrets, polls Garage admin API for readiness, assigns and applies layout if not yet configured
-- systemd units: `cloudyhome-nas-validate.service`, `cloudyhome-zfs-import.service`, `cloudyhome-nas-render.service`, `cloudyhome-nas-firewall.service`, `cloudyhome-nas-apply.service`, `cloudyhome-garage-bootstrap.service`
-- Jinja2 templates for all generated configs (NFS exports, smb.conf, iSCSI saveconfig.json, garage.toml, ftp.env, Quadlet units)
+- Shell alert script (`/usr/local/sbin/nas-health-alert`) — logs to journal, sends email via msmtp when enabled; called by both smartd and ZED
+- Shell ZEDLET wrapper (`/usr/local/sbin/nas-zedlet-wrapper`) — translates ZED environment variables and calls the alert script
+- systemd units: `cloudyhome-nas-validate.service`, `cloudyhome-zfs-import.service`, `cloudyhome-nas-render.service`, `cloudyhome-nas-firewall.service`, `cloudyhome-nas-apply.service`, `cloudyhome-garage-bootstrap.service`, `cloudyhome-zfs-scrub.service`, `cloudyhome-zfs-scrub.timer`
+- Jinja2 templates for all generated configs (NFS exports, smb.conf, iSCSI saveconfig.json, garage.toml, ftp.env, Quadlet units, alert.conf, msmtprc, nas-apply-services.sh)
+- Static config files baked into image: `/etc/smartd.conf`, `/etc/zfs/zed.d/zed.rc`, ZEDLET symlinks
 - `services.yml` canonical example (baked into image by Packer)
 - `secrets.enc.yaml` schema example (encrypted and baked into image by Packer)
 - `PACKER_CHECKLIST.md` — mandatory Packer build steps (package installs, container image pre-pull, service disable, AGE key permissions)
@@ -352,8 +379,9 @@ Recovery drill target:
 5. Add NFS and Samba generation.
 6. Add iSCSI and Garage generation.
 7. Add FTP generation.
-8. Add idempotent restart policy.
-9. Test:
+8. Add health alert rendering (`alert.conf`, `msmtprc`) and baked configs (`smartd.conf`, `zed.rc`, ZEDLET symlinks, alert script, scrub timer).
+9. Add idempotent restart policy.
+10. Test:
    - clean boot
    - repeated boot
    - missing AGE key (`/etc/sops/age/keys.txt` absent)
@@ -361,7 +389,8 @@ Recovery drill target:
    - invalid template
    - invalid secrets
    - service-specific syntax errors
-10. Perform full rebuild/recovery rehearsal.
+   - health alerting with `ALERT_ENABLED=true` (email delivery) and `ALERT_ENABLED=false` (journal only)
+11. Perform full rebuild/recovery rehearsal.
 
 ## 13. Open Decisions
 
@@ -372,7 +401,7 @@ Recovery drill target:
 - Render/config generation language: **Python**. Strict schema validation via `pydantic`; no config is written unless all validation passes. Libraries: `pyyaml`, `pydantic`, `jinja2`, `tomli-w`.
 - iSCSI backend: **direct JSON generation**. The renderer builds `/etc/target/saveconfig.json` from `services.yml` + secrets. `target.service` (rtslib-fb) restores from it on boot. No `targetcli` interactive session involved.
 - **NFS and Samba run as host services** (`nfs-kernel-server`, `smbd`), not containers. NFS is a kernel subsystem; containerizing it provides no isolation benefit and adds significant complexity. Samba follows the same decision for consistency. The VM is the isolation boundary. Garage and FTP remain containerized as Podman Quadlets.
-- **NFS and Samba start handling**: `cloudyhome-nas-apply.service` uses `systemctl reload-or-restart` for both `nfs-server.service` and `smbd.service`. This is intentional — it correctly handles both cases: starts the service if stopped, reloads/restarts if already running. The apply service does not rely on or assume any prior state of these services. The Packer image may disable their auto-start as a best-effort measure, but the boot chain is correct regardless of whether they were pre-running or not.
+- **NFS and Samba start handling**: the rendered `nas-apply-services.sh` script uses `systemctl reload-or-restart` for both `nfs-server.service` and `smbd.service`, but only when the corresponding service is present in `services.yml`. This correctly handles both cases: starts the service if stopped, reloads/restarts if already running. The apply chain does not rely on or assume any prior state of these services. The Packer image may disable their auto-start as a best-effort measure, but the boot chain is correct regardless of whether they were pre-running or not. If `nfs` or `samba` is absent from `services.yml`, the corresponding `systemctl` command is not included in the rendered script and the service is never started.
 
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
@@ -404,6 +433,7 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 - `iscsi` (optional, map): iSCSI IQN and LUN mapping.
 - `garage` (optional, map): Garage process and S3 endpoint settings.
 - `ftp` (optional, map): Pure FTP daemon settings for scanner uploads.
+- `health` (optional, map): Storage health monitoring and alert delivery settings.
 
 At least one of `nfs`, `samba`, `iscsi`, `garage`, or `ftp` must be present.
 
@@ -471,7 +501,7 @@ nfs:
             mode: "root_squash"      # one of: root_squash|no_root_squash|all_squash
             anon_uid: null           # required when mode=all_squash
             anon_gid: null           # required when mode=all_squash
-      options: []                    # optional export-level options appended to all clients
+      options: []                    # optional export-level default options; client-level options override these
       enabled: true                  # optional, default true
 
 samba:
@@ -545,13 +575,23 @@ ftp:
     max: 21010                              # maps to MAX_PORT env
   users_ref: "ftp/users"                    # maps to USERS env
   upload_root: "/zpool0/shares/scanner-inbox"
+
+health:
+  alert:
+    enabled: true                             # optional, default false; when false, smartd/ZED still log to journal but no email is sent
+    smtp_host: "smtp.example.com"             # SMTP relay hostname
+    smtp_port: 587                            # SMTP relay port (587 for STARTTLS, 465 for implicit TLS)
+    smtp_tls: "starttls"                      # one of: starttls | tls | off
+    smtp_auth_ref: "health/smtp_auth"         # key in secrets file; resolves to map with username and password
+    from_address: "nas@example.com"           # envelope sender
+    to_address: "admin@example.com"           # recipient for all alerts
 ```
 
 ### 14.4 Validation Rules
 
 **Global IP policy**: Every IP address or CIDR resolved anywhere in `services.yml` or `secrets.enc.yaml` must be a valid RFC1918 address (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). This applies to `host_ip_ref`, all `sources_ref` lists, all `cidr_ref` lists, and any other IP value. Non-RFC1918 values fail validation regardless of where they appear.
 
-- `disks.ids` in secrets must be a non-empty list of strings. Each entry is treated as a bare disk ID name; the script checks for `/dev/disk/by-id/<id>`. Empty list or absent key is a fatal error.
+- `disks.ids` in secrets must be a non-empty list of non-empty strings. Empty list or absent key is a fatal error. (Runtime disk presence verification — checking that `/dev/disk/by-id/<id>` exists for each entry — is performed by `cloudyhome-zfs-import.service` (Section 6.2), not by schema validation.)
 - `version` must equal `1`.
 - `host_ip_ref` is required and must resolve to a valid RFC1918 IP address in secrets.
 - `firewall` is required; omitting it is a validation error.
@@ -575,7 +615,8 @@ ftp:
 - `nfs.exports[*].path` must be unique.
 - `nfs.exports[*].clients` must be non-empty when export is enabled.
 - `nfs.exports[*].clients[*].cidr_ref` is required and must resolve to a non-empty CIDR list in secrets (RFC1918 enforced by global IP policy).
-- `nfs.exports[*].clients[*].options` is optional; defaults to `[]`.
+- `nfs.exports[*].options` is optional; defaults to `[]`. These are the default NFS options for the export. When a client block also specifies `options`, the client-level options replace the export-level defaults entirely (no merge).
+- `nfs.exports[*].clients[*].options` is optional; defaults to `[]`. When present and non-empty, overrides the export-level `options` for that client block. When absent or empty, the export-level `options` apply.
 - `nfs.exports[*].clients[*].identity_map.mode` is optional; defaults to `root_squash`.
 - `nfs.exports[*].clients[*].identity_map.mode` must be one of:
   - `root_squash`
@@ -627,6 +668,16 @@ ftp:
   - `upload_root` under `/zpool0/`
   - `users_ref` present and resolvable in secrets
 - `ftp.users[*].username` in secrets must be unique.
+- `health` is optional. If absent, alerting defaults to journal-only (smartd and ZED still run and log to the journal; no email notifications).
+- `health.alert.enabled` is optional, defaults to `false`. When `false`, the alert script logs to the journal only.
+- When `health.alert.enabled=true`, all of the following are required:
+  - `smtp_host` — non-empty string.
+  - `smtp_port` — valid port number in range 1–65535.
+  - `smtp_tls` — must be one of `starttls`, `tls`, or `off`.
+  - `smtp_auth_ref` — must resolve to a map in secrets with two non-empty string fields: `username` and `password`.
+  - `from_address` — non-empty string containing `@`.
+  - `to_address` — non-empty string containing `@`.
+- Email addresses are not fully validated at schema level (RFC5321 validation is impractical). The `@` check catches obvious misconfigurations; actual deliverability is verified during the first real alert.
 
 ### 14.5 Secrets Mapping Contract
 
@@ -670,6 +721,10 @@ ftp:
   users:
     - username: "scanner1"
       password: "REDACTED"
+health:
+  smtp_auth:
+    username: "nas@example.com"
+    password: "REDACTED"
 ```
 
 Note: `delfer/alpine-ftp-server` accepts `user|pass|uid|gid|homedir` but all fields after `password` are optional. This deployment uses only `username` and `password`. The renderer constructs the `USERS` env var as `user1|pass1:user2|pass2:...`.
@@ -683,3 +738,192 @@ Samba user mapping:
 - Each share's `users_ref` is a list of usernames. The renderer validates each against `samba.users[*].username` in secrets and renders them as `valid_users` in `smb.conf`.
 - Different shares may list different subsets of users for per-share access control.
 - User provisioning (writing to `tdbsam`) is handled in `cloudyhome-nas-apply.service`.
+
+---
+
+## 15. Monitoring and Storage Health
+
+### 15.1 Overview
+
+Three subsystems provide storage health automation:
+
+1. **ZFS scrub** — periodic scrub via systemd timer to detect silent data corruption.
+2. **SMART monitoring** — `smartd` runs scheduled self-tests and monitors disk health attributes.
+3. **ZFS Event Daemon (ZED)** — reacts to pool state changes, scrub results, and I/O errors in real time.
+
+All three feed into a single alert script (`/usr/local/sbin/nas-health-alert`) that logs to the systemd journal and delivers email notifications via `msmtp`. The alert script config is rendered at boot by `cloudyhome-nas-render.service` to inject the SMTP endpoint from secrets.
+
+### 15.2 ZFS Scrub Schedule
+
+Two new systemd units baked into the Packer image:
+
+**`cloudyhome-zfs-scrub.service`**
+- Type: `oneshot`
+- `After=cloudyhome-zfs-import.service`
+- Runs: `zpool scrub zpool0`
+- No `WantedBy=` — driven exclusively by the timer.
+
+**`cloudyhome-zfs-scrub.timer`**
+- `OnCalendar=*-*-1,15 02:00:00` — runs at 02:00 on the 1st and 15th of each month.
+- `Persistent=true` — if the VM was off at the scheduled time, the scrub runs on next boot.
+- `WantedBy=timers.target`
+
+The timer is enabled in the Packer image. Scrub frequency is a static image-time decision, not driven by `services.yml`.
+
+Scrub results are reported by ZED (Section 15.4) on completion — no additional polling needed.
+
+### 15.3 SMART Test Schedules
+
+**Package**: `smartmontools` (installed in Packer image).
+
+**Configuration**: static `/etc/smartd.conf` baked into the Packer image. Not rendered at boot — the VM only has the 6 passed-through SATA disks, so `DEVICESCAN` safely covers all of them without needing disk IDs from secrets.
+
+```
+DEVICESCAN -a -o on -S on -s (S/../.././02|L/../../6/03) -W 4,45,55 -m root -M exec /usr/local/sbin/nas-health-alert
+```
+
+Breakdown:
+- `-a` — monitor all SMART attributes.
+- `-o on` — enable automatic offline testing.
+- `-S on` — enable automatic attribute autosave.
+- `-s (S/../.././02|L/../../6/03)` — short self-test daily at 02:00; long self-test Saturdays at 03:00.
+- `-W 4,45,55` — temperature monitoring: log if delta exceeds 4°C between checks, warn at 45°C, critical at 55°C.
+- `-m root` — required by smartd syntax but delivery is handled by the exec script, not mail.
+- `-M exec /usr/local/sbin/nas-health-alert` — call the alert script instead of sending email directly.
+
+`smartd.service` is enabled in the Packer image. It starts independently of the cloudyhome boot chain — it only needs disks to be present, not ZFS imported.
+
+### 15.4 ZFS Event Daemon (ZED)
+
+**Package**: `zfs-zed` (installed in Packer image; included with `zfsutils-linux` on Debian).
+
+ZED watches the ZFS kernel event stream and fires shell scripts (ZEDLETs) on events. The relevant stock ZEDLETs and their behavior:
+
+| Event class | ZEDLET | Fires when |
+|---|---|---|
+| `scrub_finish` | `scrub_finish-notify.sh` | Scrub completes (includes error counts) |
+| `pool_state` | `statechange-notify.sh` | Pool transitions to DEGRADED, FAULTED, etc. |
+| `io_error` | `io-notify.sh` | Checksum, read, or write errors exceed threshold |
+| `resilver_finish` | `resilver_finish-notify.sh` | Resilver completes after disk replacement |
+
+**ZED configuration** (`/etc/zfs/zed.d/zed.rc`): baked into the Packer image with these settings:
+
+```sh
+ZED_NOTIFY_VERBOSE=1
+ZED_NOTIFY_DATA=1
+ZED_SYSLOG_TAG="zed"
+ZED_SYSLOG_SUBCLASS_INCLUDE="scrub_finish,statechange,io_error,resilver_finish"
+
+# Disable built-in email — alert delivery handled by the alert script
+ZED_EMAIL_ADDR=""
+ZED_EMAIL_PROG=""
+
+# Disable unused built-in notification methods
+ZED_PUSHBULLET_ACCESS_TOKEN=""
+ZED_NTFY_URL=""
+```
+
+**Custom ZEDLET**: a minimal wrapper script baked into the image that calls `/usr/local/sbin/nas-health-alert` with the event class and summary extracted from ZED environment variables (`ZEVENT_CLASS`, `ZEVENT_POOL`, `ZEVENT_VDEV_STATE`, etc.). ZED matches scripts by filename prefix to event subclass, so one symlink per event class is installed in `/etc/zfs/zed.d/`, all pointing to the same script:
+  - `statechange-nas-health-alert.sh`
+  - `scrub_finish-nas-health-alert.sh`
+  - `io-nas-health-alert.sh`
+  - `resilver_finish-nas-health-alert.sh`
+
+The target script is placed at `/usr/local/sbin/nas-zedlet-wrapper` (outside `/etc/zfs/zed.d/` to avoid being executed directly by ZED as an `all-` script).
+
+`zfs-zed.service` is enabled in the Packer image. It starts after ZFS modules are loaded — independent of the cloudyhome boot chain ordering.
+
+### 15.5 Alert Delivery
+
+The alert script always logs to the systemd journal first. If email alerting is enabled (`ALERT_ENABLED=true` in `alert.conf`), it then delivers via email. Journal logging is unconditional; email delivery depends on configuration.
+
+**Journal** (always active):
+- Alert script writes a structured log entry to the systemd journal via `logger` with priority and identifier tags.
+- No external dependencies. External monitoring stacks (Prometheus + Alertmanager, Loki, etc.) can scrape the journal independently.
+- This step runs unconditionally before email delivery — if email fails, the alert is still in the journal.
+
+**Email** (primary notification):
+- Sends via `msmtp` (lightweight SMTP relay client). No local MTA — `msmtp` connects directly to an upstream SMTP relay.
+- Subject line includes severity, hostname, and source (e.g., `[CRITICAL] nas01: ZFS pool DEGRADED`).
+- Body includes timestamp, source, severity, event details, and (for ZED events) pool/vdev state.
+- Timeout: 30 seconds. Delivery failures are logged to the journal but do not block the caller or suppress future alerts.
+- `msmtp` is configured via `/etc/msmtprc`, rendered at boot by `cloudyhome-nas-render.service`.
+
+The email configuration and rendered `msmtprc` + `alert.conf` are read by the alert script at invocation time (not cached at boot).
+
+### 15.6 Alert Script
+
+**Path**: `/usr/local/sbin/nas-health-alert`
+
+**Language**: Shell (POSIX). The script is called by both `smartd` (`-M exec`) and ZED (ZEDLET wrapper). Both callers pass information via environment variables, not arguments.
+
+**Behavior**:
+1. Read `/etc/cloudyhome/health/alert.conf` for alert settings (`ALERT_ENABLED`, `ALERT_TO`, `ALERT_FROM`).
+2. Determine source and severity from caller environment:
+   - **smartd**: `SMARTD_DEVICE`, `SMARTD_FAILTYPE`, `SMARTD_MESSAGE` are set. Severity: `critical` for `SMARTD_FAILTYPE=EMailTest` → `info`; `SMARTD_FAILTYPE=Health` → `critical`; all others → `warning`.
+   - **ZED**: `ZEVENT_CLASS`, `ZEVENT_POOL`, `ZEVENT_SUBCLASS` are set. Severity: `statechange` to DEGRADED/FAULTED → `critical`; `io_error` → `warning`; `scrub_finish` with errors → `warning`, without errors → `info`; `resilver_finish` → `info`.
+3. Construct message string with hostname, timestamp, source, severity, and event details.
+4. Always log to journal via `logger -t nas-health-alert -p <priority>`.
+5. If `ALERT_ENABLED=true`: send email via `msmtp` using rendered `/etc/msmtprc` config, with `ALERT_TO` as recipient and `ALERT_FROM` as sender. Log delivery success/failure to journal. Do not retry on failure. If `ALERT_ENABLED=false` or `alert.conf` is missing: skip email, journal entry is the only output.
+
+**Permissions**: `0755 root:root`. The script contains no secrets — it reads the rendered config file at runtime.
+
+### 15.7 Render and Validation Integration
+
+The `health` schema, validation rules, and secrets are defined in the canonical locations: Section 14.3 (field contract), Section 14.4 (validation rules), and Section 14.5 (secrets mapping).
+
+**Render targets**:
+
+1. `/etc/cloudyhome/health/alert.conf` — shell-sourceable file read by the alert script:
+   ```
+   ALERT_ENABLED=true
+   ALERT_TO=admin@example.com
+   ALERT_FROM=nas@example.com
+   ```
+   - Permissions: `0644 root:root` (no secrets — addresses only).
+   - If `health` is absent or `alert.enabled=false`, rendered with `ALERT_ENABLED=false` and no other fields.
+
+2. `/etc/msmtprc` — msmtp configuration file:
+   ```
+   defaults
+   auth           on
+   tls            on
+   tls_starttls   on
+   logfile        /var/log/msmtp.log
+
+   account        default
+   host           smtp.example.com
+   port           587
+   from           nas@example.com
+   user           nas@example.com
+   password       REDACTED
+   ```
+   - Permissions: `0600 root:root` (contains SMTP password).
+   - Only rendered when `health.alert.enabled=true`. If alerting is disabled, `/etc/msmtprc` is not rendered (msmtp is unused).
+   - `tls` and `tls_starttls` fields are derived from `smtp_tls`: `starttls` → `tls on` + `tls_starttls on`; `tls` → `tls on` + `tls_starttls off`; `off` → `tls off` + `tls_starttls off`.
+
+**Validation**: `nas-validate-config` validates the `health` section if present. No runtime validator needed for `alert.conf` or `msmtprc` — both are generated from Pydantic-validated input.
+
+**Render ordering**: no special ordering. Both files are rendered in the same pass as all other config files. The alert script reads them at event time, not at boot.
+
+### 15.8 Packer Image Requirements
+
+Added to `PACKER_CHECKLIST.md` scope:
+
+- **Packages**: `smartmontools`, `zfs-zed` (if not already pulled in by `zfsutils-linux`), `msmtp` (lightweight SMTP client).
+- **Baked files**:
+  - `/etc/smartd.conf` — static config per Section 15.3.
+  - `/etc/zfs/zed.d/zed.rc` — static config per Section 15.4.
+  - `/usr/local/sbin/nas-zedlet-wrapper` — ZEDLET wrapper script; symlinked into `/etc/zfs/zed.d/` per event class (`statechange-`, `scrub_finish-`, `io-`, `resilver_finish-`).
+  - `/usr/local/sbin/nas-health-alert` — alert delivery script.
+  - `cloudyhome-zfs-scrub.service` and `cloudyhome-zfs-scrub.timer` — installed to `/etc/systemd/system/`.
+- **Enabled services**: `smartd.service`, `zfs-zed.service`, `cloudyhome-zfs-scrub.timer`.
+- **Templates**: Jinja2 templates for `alert.conf` and `msmtprc` added to the render script's template set.
+
+### 15.9 Open Decisions
+
+- **Scrub frequency tuning**: The 1st/15th schedule is a starting point. May need adjustment based on pool size and observed scrub duration. Scrub duration can be checked post-deployment and the timer adjusted in a future image build.
+- **SMART long test overlap**: Long tests on Saturday at 03:00 may overlap with a scrub if the 1st/15th falls on a Saturday. ZFS scrub and SMART long tests can coexist — scrub operates at the ZFS layer while SMART tests run at the disk firmware layer — but combined I/O load may be noticeable. Acceptable for a home NAS; revisit if performance-sensitive workloads run during that window.
+- **Alert escalation**: The current design has no escalation (repeat alerts, paging). A single email per event is delivered. If escalation is needed, it should be handled downstream (e.g., email rules that forward to a paging service, or replacing msmtp delivery with a webhook to an alerting platform).
+- **Health check endpoint**: No HTTP health endpoint is exposed by this design. If external monitoring (Prometheus node_exporter, etc.) is added later, ZFS and SMART metrics can be exported via collectors rather than the alert script. This is a separate concern from email alerting.
+- **SMTP relay dependency**: Email delivery depends on an external SMTP relay being reachable. If the relay is down, alerts are lost (but still present in the journal). No local mail queue or retry is implemented — msmtp is a fire-and-forget relay client.
