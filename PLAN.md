@@ -147,6 +147,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Runs `/usr/local/sbin/nas-validate-config` (Python).
 - Purpose: validate all fields in `services.yml` and `secrets.enc.yaml` before any other boot step runs. If validation fails, the service exits non-zero and all downstream services that `Requires=` it will not start.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` using the AGE key at `/etc/sops/age/keys.txt`. Decrypted material cleaned from `/run` on exit (guaranteed cleanup regardless of success or failure).
+- Checks that `/run` is mounted as tmpfs before any decryption occurs. If not, exits non-zero immediately — the security model depends on decrypted material never being written to persistent storage.
 - Runs the full schema validation from Section 14.4 against the merged `services.yml` + decrypted secrets.
 - Emits a clear log message for every validation failure before exiting non-zero.
 - On success, exits 0 and produces no output beyond a single confirmation log line.
@@ -239,12 +240,12 @@ Core behavior:
 - Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using SOPS. The environment variable `SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` must be set before invoking `sops` (provided via `Environment=` in the systemd unit; shell scripts must also export it explicitly). Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
 - Merge `/var/lib/cloudyhome/nas/services.yml` + decrypted secrets.
 - Render target files with temp-file + validate + atomic move. Order matters:
-  1. `mkdir -p` the destination directory before writing any file. Idempotent; handles first boot where directories under `/etc/cloudyhome/` may not yet exist.
+  1. `mkdir -p` the destination directory for every output file before writing. Idempotent; applies to all render targets as several destination directories do not pre-exist on a fresh Debian image: `/etc/exports.d/`, `/etc/target/`, `/etc/containers/systemd/`, and all `config_dir` paths under `/etc/cloudyhome/`.
   2. Write output to a temp file in `/run/nas/`.
   3. Run validation against the temp file (e.g. `testparm -s <tempfile>`).
-  4. Only on validation success: compare the temp file against the existing destination using `filecmp.cmp(tmp, dest, shallow=False)` (Python) or `cmp -s` (shell). If the content is identical, discard the temp file and record the file as unchanged. If different (or the destination does not yet exist), `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path, and record the file as changed.
+  4. Only on validation success: compare the temp file against the existing destination using `filecmp.cmp(tmp, dest, shallow=False)` (Python) or `cmp -s` (shell). If the content is identical, discard the temp file. If different (or the destination does not yet exist), `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path.
   5. On validation failure: delete the temp file and exit non-zero. The live `/etc` file is never touched.
-- The changed/unchanged result from step 4 is carried forward to drive selective service reloads: a service is reloaded only if at least one of its config files was recorded as changed in that boot. Services whose configs are unchanged are not reloaded.
+- For each enabled container service (`garage`, `ftp`), also render the Quadlet `.container` file into `/etc/containers/systemd/` using the same temp-file + compare + atomic-move pattern. These files are generated from Pydantic-validated input and do not require a separate runtime validator.
 - `testparm -s` validates the Samba config; `nft -c -f <tempfile>` validates the nftables config as a dry-run before promotion to `/etc/nftables.conf`. All other outputs are trusted from Pydantic-validated input and do not require a separate runtime validator.
 - Set permissions:
   - restrictive mode for files containing credentials.
@@ -252,8 +253,7 @@ Core behavior:
 
 Idempotency (hard requirement):
 - Every render and apply step must be safe to run on every boot, including reboots with no config change.
-- Detect file changes before restart/reload; do not restart services unnecessarily. Implemented via `filecmp.cmp(tmp, dest, shallow=False)` before each atomic move — see render step 4 above.
-- Do not rewrite unchanged configs unnecessarily. If the comparison shows no change, the temp file is discarded and the destination is left untouched.
+- Do not rewrite unchanged configs unnecessarily. The `filecmp.cmp(tmp, dest, shallow=False)` comparison in render step 4 ensures the destination file is only replaced when content has actually changed. Service reloads in the apply script are unconditional — these are boot-time services with no active client connections at that point, so unconditional reload is safe and correct.
 - Samba user provisioning, iSCSI restore, dataset creation, and service reloads must all handle already-current state gracefully.
 - Any step that fails idempotency is a bug.
 
@@ -302,8 +302,7 @@ All ports are on the NAS VM. Actual rules are declared in `services.yml` (`firew
 | Port(s)       | Protocol | Service         | Source restriction              | Notes                                               |
 |---------------|----------|-----------------|---------------------------------|-----------------------------------------------------|
 | 22            | TCP      | SSH             | Admin hosts only                | VM management access                                |
-| 111           | TCP+UDP  | rpcbind         | NFS client subnet               | Required for NFSv3; not needed if NFSv4-only        |
-| 2049          | TCP+UDP  | NFS             | NFS client subnet               | Main NFS port; NFSv4 only needs TCP 2049            |
+| 2049          | TCP      | NFS             | NFS client subnet               | NFSv4 only; TCP only, no UDP required               |
 | 139           | TCP      | Samba (NetBIOS) | LAN subnet                      | Legacy NetBIOS session; not needed for SMB2/3 only  |
 | 445           | TCP      | Samba (SMB)     | LAN subnet                      | Primary Samba port for SMB2/3                       |
 | 3260          | TCP      | iSCSI           | Initiator subnet only           | Both discovery and session traffic; restrict tightly to prevent target enumeration by untrusted hosts |
@@ -378,7 +377,7 @@ Recovery drill target:
 
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
-- **Datasets**: created if missing using `zfs create -p <path>`. Parent datasets created automatically. Existing datasets left untouched. All dataset paths use the mount path form (e.g. `/zpool0/shares/media`).
+- **Datasets**: `storage.datasets` is a map of simple underscore-separated name to mount path (e.g. `shares_media: "/zpool0/shares/media"`). The apply script derives the ZFS dataset name from the mount path value by stripping the leading `/` (e.g. `zpool0/shares/media`) and passes it to `zfs create -p`. Parent datasets created automatically via `-p`. Existing datasets left untouched.
 - **zvols** (iSCSI LUNs): created if missing using `zfs create -V <size> <path>`. Existing zvols left untouched (size is not modified). Path uses dataset name form (e.g. `zpool0/iscsi/vmstore`); block device is derived as `/dev/zvol/<path>`.
 
 ## 14. Finalized `services.yml` Structure
@@ -418,16 +417,16 @@ host_ip_ref: "host/ip"              # resolves to the NAS VM's LAN IP from secre
 
 storage:
   pool: "zpool0"
-  datasets:                            # canonical inventory; created by cloudyhome-nas-apply.service if missing (zfs create -p)
-    - "/zpool0/system"                 # NAS system/state parent dataset
-    - "/zpool0/system/garage"          # Garage state parent dataset
-    - "/zpool0/system/garage/data"     # Garage data directory (bind-mounted into container)
-    - "/zpool0/system/garage/meta"     # Garage metadata directory (bind-mounted into container)
-    - "/zpool0/shares"                 # file shares parent dataset
-    - "/zpool0/shares/media"           # shared media (NFS + Samba)
-    - "/zpool0/shares/scanner-inbox"   # FTP upload root
-    - "/zpool0/iscsi"                  # zvol parent dataset for iSCSI LUNs
-    - "/zpool0/backups"                # backup target dataset (snapshots/replication landing)
+  datasets:                                                          # canonical inventory; created by cloudyhome-nas-apply.service if missing (zfs create -p)
+    system:               "/zpool0/system"                          # NAS system/state parent dataset
+    system_garage:        "/zpool0/system/garage"                   # Garage state parent dataset
+    system_garage_data:   "/zpool0/system/garage/data"              # Garage data directory (bind-mounted into container)
+    system_garage_meta:   "/zpool0/system/garage/meta"              # Garage metadata directory (bind-mounted into container)
+    shares:               "/zpool0/shares"                          # file shares parent dataset
+    shares_media:         "/zpool0/shares/media"                    # shared media (NFS + Samba)
+    shares_scanner_inbox: "/zpool0/shares/scanner-inbox"            # FTP upload root
+    iscsi:                "/zpool0/iscsi"                           # zvol parent dataset for iSCSI LUNs
+    backups:              "/zpool0/backups"                         # backup target dataset (snapshots/replication landing)
 
 firewall:
   default_input: "drop"              # drop | accept
@@ -437,8 +436,8 @@ firewall:
       proto: ["tcp"]
       sources_ref: "firewall/ssh"
     - service: "nfs"
-      ports: [111, 2049]
-      proto: ["tcp", "udp"]
+      ports: [2049]
+      proto: ["tcp"]
       sources_ref: "firewall/nfs"
     - service: "samba"
       ports: [139, 445]
@@ -462,6 +461,7 @@ firewall:
       sources_ref: "firewall/ftp"
 
 nfs:
+  version: 4                           # NFSv4 only; validated at boot. No rpcbind (port 111) or UDP required.
   exports:
     - name: "media"
       path: "/zpool0/shares/media"
@@ -565,9 +565,11 @@ ftp:
 - `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy).
 - A rule may not define both `ports` and `port_range`.
 - `storage.pool` must be `zpool0` for this deployment.
-- `storage.datasets` must be a non-empty list of unique dataset paths.
-- Each dataset entry must start with `/zpool0/` (mount path form).
+- `storage.datasets` must be a non-empty map with unique keys and unique values.
+- Each key must be a non-empty underscore-separated identifier (simple name, e.g. `shares_media`).
+- Each value must be an absolute mount path starting with `/zpool0/`. The ZFS dataset name is derived by stripping the leading `/`.
 - Any `path` intended for data export must start with `/zpool0/`.
+- `nfs.version` must be `4`. NFSv3 is not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `nfs.exports` must be a non-empty list when `nfs` is present.
 - `nfs.exports[*].name` must be unique.
 - `nfs.exports[*].path` must be unique.
@@ -618,7 +620,7 @@ ftp:
   - non-empty `quadlet_name`
   - `config_dir` must be a non-empty absolute path; the renderer writes `ftp.env` into this directory and the Quadlet mounts it into the container
   - non-empty `image` (FTP container image is `delfer/alpine-ftp-server`; version pinning is managed in the Quadlet file, not validated here)
-  - `control_port=21` unless explicitly overridden
+  - `control_port` must be `21`. Hardware scanners expect the standard FTP control port; non-standard values are not supported in this deployment.
   - valid passive range (`passive_ports.min <= passive_ports.max`)
   - `upload_root` under `/zpool0/`
   - `users_ref` present and resolvable in secrets
