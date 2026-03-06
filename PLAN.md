@@ -83,7 +83,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
    - Merges secret + non-secret data.
    - Renders firewall/NFS/Samba/iSCSI/Garage/FTP configs into `/etc`.
    - Validates generated config syntax.
-   - Cleans decrypted material from `/run`.
+   - Decrypted material cleaned from `/run` automatically via `trap on EXIT`.
 5. `nas-firewall.service`:
    - Loads `/etc/nftables.conf` via `nft -f`.
    - Firewall is active before any NAS service starts.
@@ -111,7 +111,17 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - `After=cloud-init.target zfs-mount.service`
 - Runs `/usr/local/sbin/nas-render-config`.
 
-## 6.3 `nas-apply-config.service`
+## 6.3 `nas-firewall.service`
+- Type: `oneshot`
+- `After=nas-render-config.service`
+- `Before=nas-apply-config.service`
+- Loads `/etc/nftables.conf` via `nft -f /etc/nftables.conf`.
+- Stateful firewall: established/related connections auto-allowed.
+- Loopback traffic always permitted.
+- Default input policy: drop (as specified in `services.yml`).
+- Firewall is fully active before any NAS service starts.
+
+## 6.4 `nas-apply-config.service`
 - Type: `oneshot`
 - `After=nas-render-config.service nas-firewall.service`
 - Performs apply/reload behavior via explicit `systemctl start` and `systemctl reload-or-restart` calls — not via `Wants=` or `Before=` dependencies.
@@ -124,16 +134,6 @@ All outputs are generated atomically from template + decrypted secrets at boot.
   5. `systemctl restart target.service` (iSCSI — full restart to apply new saveconfig.json)
   6. `systemctl start cloudyhome-garage.service`
   7. `systemctl start cloudyhome-ftp.service`
-
-## 6.4 `nas-firewall.service`
-- Type: `oneshot`
-- `After=nas-render-config.service`
-- `Before=nas-apply-config.service`
-- Loads `/etc/nftables.conf` via `nft -f /etc/nftables.conf`.
-- Stateful firewall: established/related connections auto-allowed.
-- Loopback traffic always permitted.
-- Default input policy: drop (as specified in `services.yml`).
-- Firewall is fully active before any NAS service starts.
 
 ## 6.5 `garage-bootstrap.service`
 - Type: `oneshot`
@@ -393,7 +393,7 @@ samba:
 
 iscsi:
   base_iqn: "iqn.2026-03.home.arpa:nas01"
-  portal_port: 3260                    # bind IP resolved from host_ip_ref
+  portal_port: 3260                    # bind IP resolved from host_ip_ref; single portal, single NIC — multipath not required for this deployment
   targets:
     - name: "vmstore"
       iqn_suffix: "vmstore"
@@ -432,7 +432,7 @@ ftp:
   runtime: "podman-quadlet-root"
   quadlet_name: "cloudyhome-ftp"
   image: "delfer/alpine-ftp-server:latest"
-  bind_address_ref: "host/ip"               # maps to ADDRESS env; resolved from secrets
+  # bind address resolved from top-level host_ip_ref; maps to ADDRESS env
   control_port: 21
   passive_ports:
     min: 21000                              # maps to MIN_PORT env
@@ -446,8 +446,11 @@ ftp:
 ```
 
 ### 14.4 Validation Rules
+
+**Global IP policy**: Every IP address or CIDR resolved anywhere in `services.yml` or `secrets.enc.yaml` must be a valid RFC1918 address (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). This applies to `host_ip_ref`, all `sources_ref` lists, all `cidr_ref` lists, and any other IP value. Non-RFC1918 values fail validation regardless of where they appear.
+
 - `version` must equal `1`.
-- `host_ip_ref` is required and must resolve to a valid IP address in secrets.
+- `host_ip_ref` is required and must resolve to a valid RFC1918 IP address in secrets.
 - `firewall` is required; omitting it is a validation error.
 - `firewall.default_input` must be one of `drop` or `accept`.
 - `firewall.rules` must be a non-empty list.
@@ -455,15 +458,14 @@ ftp:
 - `ports` entries must be valid port numbers (1–65535).
 - `port_range` must be a two-element list `[min, max]` where `min <= max` and both are valid port numbers.
 - `proto` entries must be one of `tcp` or `udp`.
-- `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets.
-- All resolved source IPs and CIDRs must be RFC1918 addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). Non-RFC1918 sources fail validation.
+- `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy).
 - A rule may not define both `ports` and `port_range`.
 - `storage.pool` must be `zpool0` for this deployment.
 - `storage.datasets` must be a non-empty list of unique dataset paths.
 - Each dataset entry must start with `/zpool0/` (mount path form).
 - Any `path` intended for data export must start with `/zpool0/`.
 - `nfs.exports[*].clients` must be non-empty when export is enabled.
-- `nfs.exports[*].clients[*].cidr_ref` is required and must resolve to a non-empty CIDR list in secrets.
+- `nfs.exports[*].clients[*].cidr_ref` is required and must resolve to a non-empty CIDR list in secrets (RFC1918 enforced by global IP policy).
 - `nfs.exports[*].clients[*].options` is optional; defaults to `[]`.
 - `nfs.exports[*].clients[*].identity_map.mode` is optional; defaults to `root_squash`.
 - `nfs.exports[*].clients[*].identity_map.mode` must be one of:
@@ -484,7 +486,7 @@ ftp:
   - non-empty `quadlet_name`
   - non-empty `image` (Garage container image is `dxflrs/garage`; version pinning is managed in the Quadlet file, not validated here)
   - both `admin_token_ref` and `rpc_secret_ref`
-  - `admin_bind` must be specified; no firewall rule is generated for it — blocked by default-drop
+  - `admin_port` must be specified; no firewall rule is generated for it — blocked by default-drop
 - `ftp.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
