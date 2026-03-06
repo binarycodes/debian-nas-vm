@@ -43,7 +43,7 @@ tomli-w
 Container images must be pulled into the Podman image store during Packer build so that Quadlet services can start at boot without any network dependency.
 
 Images to pre-pull:
-- `dxflrs/garage:latest` (Garage S3)
+- `dxflrs/garage:latest` (Garage S3) — **minimum Garage v1.x required**. The bootstrap script passes `layout_capacity` as a human-readable string (e.g. `"1G"`) to `garage layout assign -c`. This format is only supported in Garage v1.x and later; older versions require capacity as an integer in bytes.
 - `delfer/alpine-ftp-server:latest` (FTP)
 
 Pull command during Packer provisioning:

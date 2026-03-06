@@ -91,7 +91,7 @@ Tradeoff accepted:
   - `/var/lib/cloudyhome/nas/secrets.enc.yaml`
 - AGE private key (cloud-init injected):
   - Delivered via cloud-init `write_files` to `/etc/sops/age/keys.txt` at first boot.
-  - SOPS uses this path automatically as the AGE identity.
+  - SOPS does **not** auto-discover this path. All scripts and systemd units that invoke SOPS must set `SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` explicitly (via `Environment=` in the unit or an export in the shell script).
   - The image contains encrypted secrets but never the decryption key.
 
 ### 4.3 Generated Runtime Outputs
@@ -142,6 +142,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - `After=cloud-init.target`
 - `Requires=cloud-init.target`
 - `RuntimeDirectory=nas`
+- `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
 - `WantedBy=multi-user.target`
 - Runs `/usr/local/sbin/nas-validate-config` (Python).
 - Purpose: validate all fields in `services.yml` and `secrets.enc.yaml` before any other boot step runs. If validation fails, the service exits non-zero and all downstream services that `Requires=` it will not start.
@@ -155,6 +156,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - `After=sysinit.target cloudyhome-nas-validate.service`
 - `Requires=cloudyhome-nas-validate.service`
 - `RuntimeDirectory=nas`
+- `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
 - `WantedBy=multi-user.target`
 - Purpose: import `zpool0` if not already imported, then mount all datasets.
 - Runs `/usr/local/sbin/nas-zfs-import` (shell).
@@ -170,6 +172,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - `Requires=cloudyhome-nas-validate.service`
 - `WantedBy=multi-user.target`
 - `RuntimeDirectory=nas` — systemd creates `/run/nas/` before the script starts and removes it after exit. Required for `flock /run/nas/render.lock`.
+- `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
 - Runs `/usr/local/sbin/nas-render-config`.
 
 ## 6.4 `cloudyhome-nas-firewall.service`
@@ -187,17 +190,19 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 
 ## 6.5 `cloudyhome-nas-apply.service`
 - Type: `oneshot`
-- `After=cloudyhome-nas-render.service cloudyhome-nas-firewall.service`
+- `After=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service`
 - `Requires=cloudyhome-nas-render.service cloudyhome-nas-firewall.service`
 - `RuntimeDirectory=nas`
+- `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
 - `WantedBy=multi-user.target`
 - Runs `/usr/local/sbin/nas-apply-config` (Python).
 - Acquires lock (`flock /run/nas/apply.lock`) to avoid concurrent runs.
 - Performs apply/reload behavior via explicit `systemctl start` and `systemctl reload-or-restart` calls — not via `Wants=` or `Before=` dependencies.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
+- **ZFS dependency note**: `cloudyhome-zfs-import.service` exits 0 whether or not the pool was found (pool creation is always out-of-band). `Requires=` is therefore not used — it would be satisfied regardless of pool state. `After=` is used to guarantee ordering only. Steps 1 and 3–10 below are safe to run without ZFS. Step 2 requires ZFS and will log errors and skip individual dataset/zvol entries that fail; it must not abort the entire service. Downstream services that depend on ZFS paths will fail naturally if the pool is absent.
 - Service interaction order:
   1. `systemctl daemon-reload` — required so systemd sees the Quadlet `.container` files rendered by `cloudyhome-nas-render.service`; must run before any Quadlet unit is started.
-  2. Create missing datasets and zvols.
+  2. Create missing datasets and zvols. Each `zfs create` is attempted independently; failures are logged and skipped without aborting the remaining steps.
   3. Create missing Samba OS users: for each `smb_`-prefixed user in `samba.users[]` in secrets, run `useradd --no-create-home --shell /usr/sbin/nologin <username>` if the account does not already exist. Idempotent.
   4. Provision Samba users into `tdbsam` via `smbpasswd`/`pdbedit`.
   5. `systemctl reload-or-restart nfs-server.service`
@@ -212,6 +217,8 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - `After=cloudyhome-garage.service`
 - `Wants=cloudyhome-garage.service`
 - `RuntimeDirectory=nas`
+- `Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt`
+- No `WantedBy=` — intentionally omitted. This service is not auto-started by systemd; it is driven exclusively by `cloudyhome-nas-apply.service` via `systemctl start cloudyhome-garage-bootstrap.service` (step 10 of Section 6.5).
 - Runs `/usr/local/sbin/nas-garage-bootstrap` (Python).
 - Purpose: idempotent Garage layout assignment.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
@@ -229,14 +236,15 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 
 Core behavior:
 - Acquire lock (`flock /run/nas/render.lock`) to avoid concurrent runs.
-- Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using SOPS with AGE key at `/etc/sops/age/keys.txt`. Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
+- Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using SOPS. The environment variable `SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` must be set before invoking `sops` (provided via `Environment=` in the systemd unit; shell scripts must also export it explicitly). Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
 - Merge `/var/lib/cloudyhome/nas/services.yml` + decrypted secrets.
 - Render target files with temp-file + validate + atomic move. Order matters:
   1. `mkdir -p` the destination directory before writing any file. Idempotent; handles first boot where directories under `/etc/cloudyhome/` may not yet exist.
   2. Write output to a temp file in `/run/nas/`.
   3. Run validation against the temp file (e.g. `testparm -s <tempfile>`).
-  4. Only on validation success: `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path.
+  4. Only on validation success: compare the temp file against the existing destination using `filecmp.cmp(tmp, dest, shallow=False)` (Python) or `cmp -s` (shell). If the content is identical, discard the temp file and record the file as unchanged. If different (or the destination does not yet exist), `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path, and record the file as changed.
   5. On validation failure: delete the temp file and exit non-zero. The live `/etc` file is never touched.
+- The changed/unchanged result from step 4 is carried forward to drive selective service reloads: a service is reloaded only if at least one of its config files was recorded as changed in that boot. Services whose configs are unchanged are not reloaded.
 - `testparm -s` validates the Samba config; `nft -c -f <tempfile>` validates the nftables config as a dry-run before promotion to `/etc/nftables.conf`. All other outputs are trusted from Pydantic-validated input and do not require a separate runtime validator.
 - Set permissions:
   - restrictive mode for files containing credentials.
@@ -244,8 +252,8 @@ Core behavior:
 
 Idempotency (hard requirement):
 - Every render and apply step must be safe to run on every boot, including reboots with no config change.
-- Detect file changes before restart/reload; do not restart services unnecessarily.
-- Do not rewrite unchanged configs unnecessarily.
+- Detect file changes before restart/reload; do not restart services unnecessarily. Implemented via `filecmp.cmp(tmp, dest, shallow=False)` before each atomic move — see render step 4 above.
+- Do not rewrite unchanged configs unnecessarily. If the comparison shows no change, the temp file is discarded and the destination is left untouched.
 - Samba user provisioning, iSCSI restore, dataset creation, and service reloads must all handle already-current state gracefully.
 - Any step that fails idempotency is a bug.
 
@@ -315,7 +323,7 @@ Build/deploy model:
 
 Deliverable scope (this project):
 - Python validate script (`/usr/local/sbin/nas-validate-config`) — decrypts secrets, runs full schema validation against `services.yml` + `secrets.enc.yaml`, exits non-zero with clear error messages on any failure
-- Shell ZFS import script (`/usr/local/sbin/nas-zfs-import`) — decrypts secrets via `sops -d` and extracts `disks.ids[]` using `yq` for the disk presence check; implements three-case ZFS import logic (already imported / importable / not found)
+- Shell ZFS import script (`/usr/local/sbin/nas-zfs-import`) — decrypts secrets via `sops -d` (requires `export SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt` at the top of the script) and extracts `disks.ids[]` using `yq` for the disk presence check; implements three-case ZFS import logic (already imported / importable / not found)
 - Python renderer script (`/usr/local/sbin/nas-render-config`) — reads `services.yml` + decrypted secrets, validates, renders all configs into `/etc`
 - Python apply script (`/usr/local/sbin/nas-apply-config`) — reads `services.yml` + decrypted secrets, creates datasets/zvols, provisions OS users and `tdbsam`, manages service lifecycle; Python for consistent YAML parsing with the renderer
 - Python bootstrap script (`/usr/local/sbin/nas-garage-bootstrap`) — reads `services.yml` + decrypted secrets, polls Garage admin API for readiness, assigns and applies layout if not yet configured
@@ -461,7 +469,7 @@ nfs:
         - cidr_ref: "nfs/media"      # resolves to CIDR list in secrets
           options: ["rw", "sync", "no_subtree_check"]
           identity_map:
-            mode: "root_squash"      # one of: none|root_squash|all_squash|no_root_squash
+            mode: "root_squash"      # one of: root_squash|no_root_squash|all_squash
             anon_uid: null           # required when mode=all_squash
             anon_gid: null           # required when mode=all_squash
       options: []                    # optional export-level options appended to all clients
@@ -471,7 +479,6 @@ samba:
   global:
     workgroup: "WORKGROUP"
     server_string: "CloudyHome NAS" # optional
-    map_to_guest: "Bad User"         # optional
   shares:
     - name: "media"
       path: "/zpool0/shares/media"
@@ -569,10 +576,9 @@ ftp:
 - `nfs.exports[*].clients[*].options` is optional; defaults to `[]`.
 - `nfs.exports[*].clients[*].identity_map.mode` is optional; defaults to `root_squash`.
 - `nfs.exports[*].clients[*].identity_map.mode` must be one of:
-  - `none`
   - `root_squash`
-  - `all_squash`
   - `no_root_squash`
+  - `all_squash`
 - If `identity_map.mode=all_squash`, both `anon_uid` and `anon_gid` are required.
 - `samba.shares` must be a non-empty list when `samba` is present.
 - `samba.shares[*].name` must be unique.
