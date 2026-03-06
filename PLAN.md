@@ -18,7 +18,7 @@ Constraints and requirements:
   - S3 (Garage)
   - FTP (pure FTP for scanner uploads; no SFTP)
 - Declarative service intent should be in YAML template(s) baked into image under `/var/lib/cloudyhome/nas/...`.
-- Secrets are in a baked SOPS+AGE encrypted file; cloud-init provides only decrypt token/pass.
+- Secrets are in a baked SOPS+AGE encrypted file; cloud-init provides the AGE private key via `write_files`.
 - Generated runtime configs should live in `/etc` (not persisted in pool by default).
 
 ## 2. Objectives
@@ -54,8 +54,10 @@ Tradeoff accepted:
   - `/var/lib/cloudyhome/nas/services.yml`
 - Secret encrypted file (baked in image):
   - `/var/lib/cloudyhome/nas/secrets.enc.yaml`
-- Cloud-init runtime secret input:
-  - Token/pass written to `/run/nas/bootstrap.token` with `0600`.
+- AGE private key (cloud-init injected):
+  - Delivered via cloud-init `write_files` to `/etc/sops/age/keys.txt` at first boot.
+  - SOPS uses this path automatically as the AGE identity.
+  - The image contains encrypted secrets but never the decryption key.
 
 ### 4.3 Generated Runtime Outputs
 - `/etc/exports.d/cloudyhome.exports` (NFS)
@@ -70,13 +72,13 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 
 ## 5. Boot Workflow
 
-1. `cloud-init` finishes and writes decrypt token/pass to `/run/nas/bootstrap.token`.
+1. `cloud-init` finishes; AGE private key is present at `/etc/sops/age/keys.txt` (written via `write_files`).
 2. `zfs-import-existing.service`:
    - Checks whether `zpool0` is imported.
    - Imports `zpool0` if needed.
 3. `zfs-mount.service` mounts datasets.
 4. `nas-render-config.service`:
-   - Decrypts secrets from baked SOPS file using token/pass.
+   - Decrypts secrets from baked SOPS file using AGE key at `/etc/sops/age/keys.txt`.
    - Merges secret + non-secret data.
    - Renders NFS/Samba/iSCSI/Garage/FTP configs into `/etc`.
    - Validates generated config syntax.
@@ -89,14 +91,16 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 
 ## 6.1 `zfs-import-existing.service`
 - Type: `oneshot`
-- Purpose: import existing `zpool0` if absent.
+- Purpose: import existing `zpool0` if not already imported.
 - Order: before `zfs-mount.service`.
+- If the pool is already imported: no-op.
+- If the pool is found and importable: import it.
+- If the pool is not found: exit cleanly. Pool creation is a manual, out-of-band operation — never attempted here. Downstream services that require ZFS paths will fail naturally if the pool is absent.
 
 ## 6.2 `nas-render-config.service`
 - Type: `oneshot`
-- `After=cloud-init.service network-online.target zfs-mount.service`
-- `Wants=network-online.target`
-- Runs `/usr/local/sbin/nas-render-config.sh`.
+- `After=cloud-init.target zfs-mount.service`
+- Runs `/usr/local/sbin/nas-render-config`.
 
 ## 6.3 `nas-apply-config.service`
 - Type: `oneshot`
@@ -108,20 +112,30 @@ All outputs are generated atomically from template + decrypted secrets at boot.
   - iSCSI target service (`target.service` or distro equivalent)
   - `cloudyhome-garage.service`
   - `cloudyhome-ftp.service`
+- Provisions Samba users into `tdbsam` via `smbpasswd`/`pdbedit` using plaintext passwords from decrypted secrets. Runs before `smbd.service` starts.
 
-## 7. Script Design (`nas-render-config.sh`)
+## 6.4 `garage-bootstrap.service`
+- Type: `oneshot`
+- `After=cloudyhome-garage.service`
+- `Wants=cloudyhome-garage.service`
+- Purpose: idempotent Garage layout assignment.
+- Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` directly using the AGE key at `/etc/sops/age/keys.txt` to read the admin token. The AGE key is not removed after render and remains available for this purpose.
+- Queries the Garage admin API (`GET /v1/layout`); if the current layout has no roles assigned, runs:
+  1. `garage layout assign -z garage -c <capacity> <node-id>`
+  2. `garage layout apply --version 1`
+- If roles are already present in the API response, exits successfully without making changes.
+- `capacity` is derived from `services.yml` (`garage.layout_capacity`).
+
+## 7. Script Design (`nas-render-config`)
 
 Core behavior:
 - Acquire lock (`flock`) to avoid concurrent runs.
-- Ensure ZFS pool import (`zpool list zpool0 || zpool import zpool0`).
-- Read token from file (`/run/nas/bootstrap.token`), never as command arg.
-- Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to `/run/nas/secrets.yaml`.
+- Decrypt `/var/lib/cloudyhome/nas/secrets.enc.yaml` to `/run/nas/secrets.yaml` using SOPS with AGE key at `/etc/sops/age/keys.txt`.
 - Merge `/var/lib/cloudyhome/nas/services.yml` + decrypted secrets.
 - Render target files into `/etc` with temp-file + atomic move.
 - Set permissions:
   - restrictive mode for files containing credentials.
 - Validate:
-  - `exportfs -ra` (NFS)
   - `testparm -s` (Samba)
   - iSCSI parse/restore precheck
   - Garage config and Quadlet preflight
@@ -129,15 +143,16 @@ Core behavior:
 - Remove decrypted intermediates and token.
 - Exit non-zero on any failed validation.
 
-Idempotency:
-- Safe for every boot.
-- Detect file changes before restart/reload.
+Idempotency (hard requirement):
+- Every render and apply step must be safe to run on every boot, including reboots with no config change.
+- Detect file changes before restart/reload; do not restart services unnecessarily.
 - Do not rewrite unchanged configs unnecessarily.
+- Samba user provisioning, iSCSI restore, dataset creation, and service reloads must all handle already-current state gracefully.
+- Any step that fails idempotency is a bug.
 
 ## 8. Data Model (Template Contract)
 
 `services.yml` defines non-secret structure:
-- NAS identity
 - NFS export paths/options
 - Samba global + shares
 - iSCSI target/LUN mapping
@@ -145,7 +160,7 @@ Idempotency:
 - FTP listeners, passive port range, and upload policy
 
 `secrets.enc.yaml` defines sensitive values:
-- Samba users/password hashes or auth material
+- Samba users/passwords
 - iSCSI CHAP credentials
 - Garage RPC/S3/admin secrets/keys
 - FTP local/virtual account credentials
@@ -157,30 +172,36 @@ Renderer contract:
 ## 9. Security Model
 
 Controls:
-- Decrypt token/pass is short-lived and only in `/run` (`tmpfs`).
-- No token in process args, environment, or shell history.
-- Decrypted secrets exist only transiently in `/run`; removed after render.
+- AGE private key delivered via cloud-init `write_files` — never in process args, environment, or shell history.
+- Decrypted secrets exist only transiently in `/run` (`tmpfs`); removed after render.
 - Restrictive ownership and modes on generated `/etc` files.
 - Journald/logging avoids printing secret values.
 
 Risk notes:
-- Cloud-init artifacts can retain data if not explicitly handled.
-- Mitigation: clean token file post-use and disable verbose command echo in bootstrap.
+- `/etc/sops/age/keys.txt` persists on the VM filesystem for the lifetime of the VM; access must be restricted to root (`0600`).
+- Cloud-init `write_files` should set `permissions: '0600'` and `owner: root:root` explicitly.
 
 ## 10. Operations and Lifecycle
 
 Build/deploy model:
-1. Build Debian image with Packer.
-2. Provision/update VM with Terraform (Proxmox provider).
-3. On first boot, cloud-init injects token/pass and identity values.
+1. Build Debian image with Packer (existing, out of scope).
+2. Provision/update VM with Terraform (existing, out of scope).
+3. On first boot, cloud-init injects AGE key via `write_files`.
 4. systemd imports pool, renders configs, starts services.
+
+Deliverable scope (this project):
+- Python renderer script (`/usr/local/sbin/nas-render-config`)
+- systemd units: `zfs-import-existing.service`, `nas-render-config.service`, `nas-apply-config.service`
+- Jinja2 templates for all generated configs (NFS exports, smb.conf, iSCSI saveconfig.json, garage.toml, ftp.env, Quadlet units)
+- `services.yml` canonical example (baked into image by Packer)
+- `secrets.enc.yaml` schema example (encrypted and baked into image by Packer)
+- All files are placed under a source tree that Packer copies into the image
 
 Recovery drill target:
 - Recreate VM from image + IaC.
 - Reattach same disks by ID.
 - Import `zpool0`.
 - Regenerate configs.
-- Validate client access for NFS/Samba/iSCSI/S3.
 - Validate client access for NFS/Samba/iSCSI/S3/FTP.
 
 ## 11. Implementation Plan
@@ -198,7 +219,7 @@ Recovery drill target:
 7. Test:
    - clean boot
    - repeated boot
-   - missing token
+   - missing AGE key (`/etc/sops/age/keys.txt` absent)
    - invalid template
    - invalid secrets
    - service-specific syntax errors
@@ -206,13 +227,16 @@ Recovery drill target:
 
 ## 12. Open Decisions
 
-- Final choice of template/render implementation language (shell+yq/jq, Python, or Go).
-- iSCSI backend config format (`targetcli` save/restore method vs direct JSON generation).
-- Whether to persist any derived credentials to ZFS dataset vs regenerate each boot.
-
 ### 12.1 Decided Constraints
+- **No credential persistence to ZFS.** All credentials are reprovisioned from secrets on every boot (including reboots). Config changes mean VM replacement, so secrets in the image are always current. All apply steps must be idempotent and safe to rerun.
 
 - Container runtime is fixed: root Podman Quadlets for all containers.
+- Render/config generation language: **Python**. Strict schema validation via `pydantic`; no config is written unless all validation passes. Libraries: `pyyaml`, `pydantic`, `jinja2`, `tomli-w`.
+- iSCSI backend: **direct JSON generation**. The renderer builds `/etc/target/saveconfig.json` from `services.yml` + secrets. `target.service` (rtslib-fb) restores from it on boot. No `targetcli` interactive session involved.
+- **NFS and Samba run as host services** (`nfs-kernel-server`, `smbd`), not containers. NFS is a kernel subsystem; containerizing it provides no isolation benefit and adds significant complexity. Samba follows the same decision for consistency. The VM is the isolation boundary. Garage and FTP remain containerized as Podman Quadlets.
+
+### 12.2 Dataset Creation
+Datasets listed in `storage.datasets` are created if missing during `nas-apply-config.service`. Uses `zfs create -p` which creates all missing parents automatically (no ordering required). Existing datasets are left untouched. All dataset paths use the mount path form (e.g. `/zpool0/shares/media`).
 
 ## 13. Finalized `services.yml` Structure
 
@@ -229,7 +253,6 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 
 ### 13.2 Top-Level Keys
 - `version` (required, integer): schema version. Initial value: `1`.
-- `identity` (required, map): node-level naming and network defaults.
 - `storage` (required, map): pool and dataset conventions.
 - `nfs` (optional, map): NFS export definitions.
 - `samba` (optional, map): Samba global and share definitions.
@@ -278,7 +301,7 @@ samba:
       browsable: true
       read_only: false
       guest_ok: false
-      valid_users: ["@nasusers"]     # optional
+      valid_users: ["alice"]         # optional; must match samba.users[*].username in secrets
       write_list: []                 # optional
       force_user: ""                 # optional
       force_group: ""                # optional
@@ -317,6 +340,7 @@ garage:
   replication_mode: "none"              # single-node default
   data_dir: "/zpool0/system/garage/data"
   metadata_dir: "/zpool0/system/garage/meta"
+  layout_capacity: "1G"                 # capacity string passed to `garage layout assign`
   admin_token_ref: "garage/admin_token" # key in secrets file
   rpc_secret_ref: "garage/rpc_secret"   # key in secrets file
 
@@ -342,7 +366,7 @@ ftp:
 - `version` must equal `1`.
 - `storage.pool` must be `zpool0` for this deployment.
 - `storage.datasets` must be a non-empty list of unique dataset paths.
-- Each dataset entry must start with either `/zpool0` (mount path) or `zpool0/` (dataset name).
+- Each dataset entry must start with `/zpool0/` (mount path form).
 - Any `path` intended for data export must start with `/zpool0/`.
 - `nfs.exports[*].clients` must be non-empty when export is enabled.
 - `nfs.exports[*].clients[*].cidr` is required.
@@ -355,17 +379,19 @@ ftp:
   - `no_root_squash`
 - If `identity_map.mode=all_squash`, both `anon_uid` and `anon_gid` are required.
 - `samba.shares[*].name` must be unique.
+- `samba.shares[*].valid_users` entries must all be plain usernames; `@group` syntax is not permitted.
+- Every entry in `samba.shares[*].valid_users` must exist in `samba.users[*].username` in secrets. Unresolved usernames fail validation.
 - `iscsi.targets[*].name` must be unique.
 - `iscsi.targets[*].luns[*].lun` must be unique per target.
 - `garage.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
-  - non-empty `image`
+  - non-empty `image` (Garage container image is `dxflrs/garage`; version pinning is managed in the Quadlet file, not validated here)
   - both `admin_token_ref` and `rpc_secret_ref`
 - `ftp.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
-  - `image=delfer/alpine-ftp-server:latest` (or approved pinned tag)
+  - non-empty `image` (FTP container image is `delfer/alpine-ftp-server`; version pinning is managed in the Quadlet file, not validated here)
   - `control_port=21` unless explicitly overridden
   - valid passive range (`passive_ports.min <= passive_ports.max`)
   - `upload_root` under `/zpool0/`
@@ -388,14 +414,22 @@ garage:
 samba:
   users:
     - username: "alice"
-      password_hash: "REDACTED"
+      password: "REDACTED"
 ftp:
   users:
     - username: "scanner1"
       password: "REDACTED"
 ```
 
+Note: `delfer/alpine-ftp-server` accepts `user|pass|uid|gid|homedir` but all fields after `password` are optional. This deployment uses only `username` and `password`. The renderer constructs the `USERS` env var as `user1|pass1:user2|pass2:...`.
+
 Rules:
 - References are resolved as slash-delimited paths (example: `garage/admin_token`).
 - Renderer must fail if a referenced key is absent.
 - Renderer must not print resolved secret values in logs.
+
+Samba user mapping:
+- `samba.users[]` in secrets is the authoritative user list.
+- The renderer extracts usernames from `samba.users[*].username` and makes them available as the `samba_usernames` list when rendering `smb.conf`.
+- `valid_users` in `services.yml` shares must reference plain usernames only. All listed usernames are validated against `samba.users[*].username` in secrets at render time — missing users fail closed.
+- User provisioning (writing to `tdbsam`) is handled in `nas-apply-config.service`.
