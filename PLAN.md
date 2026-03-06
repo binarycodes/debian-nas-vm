@@ -113,20 +113,19 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 
 ## 6.3 `nas-apply-config.service`
 - Type: `oneshot`
-- `After=nas-render-config.service`
+- `After=nas-render-config.service nas-firewall.service`
 - Performs apply/reload behavior via explicit `systemctl start` and `systemctl reload-or-restart` calls — not via `Wants=` or `Before=` dependencies.
+- Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a `mktemp`-created file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Removes the temp file on exit (trap on EXIT).
 - Service interaction order:
   1. Create missing datasets and zvols.
-  2. Provision Samba users into `tdbsam`.
+  2. Provision Samba users into `tdbsam` via `smbpasswd`/`pdbedit`.
   3. `systemctl reload-or-restart nfs-server.service`
   4. `systemctl reload-or-restart smbd.service`
   5. `systemctl restart target.service` (iSCSI — full restart to apply new saveconfig.json)
   6. `systemctl start cloudyhome-garage.service`
   7. `systemctl start cloudyhome-ftp.service`
-- Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a `mktemp`-created file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Removes the temp file on exit (trap on EXIT).
-- Provisions Samba users into `tdbsam` via `smbpasswd`/`pdbedit`. Runs before `smbd.service` starts.
 
-## 6.5 `nas-firewall.service`
+## 6.4 `nas-firewall.service`
 - Type: `oneshot`
 - `After=nas-render-config.service`
 - `Before=nas-apply-config.service`
@@ -136,7 +135,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Default input policy: drop (as specified in `services.yml`).
 - Firewall is fully active before any NAS service starts.
 
-## 6.6 `garage-bootstrap.service`
+## 6.5 `garage-bootstrap.service`
 - Type: `oneshot`
 - `After=cloudyhome-garage.service`
 - `Wants=cloudyhome-garage.service`
@@ -148,7 +147,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
   1. `podman exec cloudyhome-garage garage layout assign -z garage -c <capacity> <node-id>`
   2. `podman exec cloudyhome-garage garage layout apply --version 1`
 - If roles are already present in the API response, exits successfully without making changes.
-- `capacity` is derived from `services.yml` (`garage.layout_capacity`).
+- Reads `capacity` from `/var/lib/cloudyhome/nas/services.yml` (`garage.layout_capacity`). `services.yml` is not encrypted and is read directly.
 - Single-node deployment: only one node ID is expected.
 
 ## 7. Script Design (`nas-render-config`)
@@ -162,7 +161,6 @@ Core behavior:
   - restrictive mode for files containing credentials.
 - Validate:
   - `testparm -s` (Samba) — only runtime validation needed; all other outputs are generated from Pydantic-validated input and trusted programmatically.
-- Remove decrypted intermediates from `/run`.
 - Exit non-zero on any failed validation.
 
 Idempotency (hard requirement):
@@ -175,6 +173,7 @@ Idempotency (hard requirement):
 ## 8. Data Model (Template Contract)
 
 `services.yml` defines non-secret structure:
+- Firewall rules (port, protocol, sources_ref)
 - NFS export paths/options
 - Samba global + shares
 - iSCSI target/LUN mapping
@@ -182,6 +181,9 @@ Idempotency (hard requirement):
 - FTP listeners, passive port range, and upload policy
 
 `secrets.enc.yaml` defines sensitive values:
+- NAS VM host IP (`host/ip`)
+- Firewall source IP lists (per service)
+- NFS client CIDRs (per export)
 - Samba users/passwords
 - iSCSI CHAP credentials
 - Garage RPC/S3/admin secrets/keys
@@ -218,8 +220,8 @@ All ports are on the NAS VM. Actual rules are declared in `services.yml` (`firew
 | 445           | TCP      | Samba (SMB)     | LAN subnet                      | Primary Samba port for SMB2/3                       |
 | 3260          | TCP      | iSCSI           | Initiator subnet only           | Both discovery and session traffic; restrict tightly to prevent target enumeration by untrusted hosts |
 | 3900          | TCP      | Garage S3       | S3 client subnet                | Garage S3-compatible object storage API             |
-| 3901          | TCP      | Garage RPC      | Loopback only                   | Single-node: no inter-node RPC needed; bind to loopback |
-| 3903          | TCP      | Garage admin    | Loopback only                   | Admin API; never exposed externally                 |
+| 3901          | TCP      | Garage RPC      | No rule — blocked by default-drop | Single-node: no external RPC needed; bound to host IP, no firewall rule |
+| 3903          | TCP      | Garage admin    | No rule — blocked by default-drop | Admin API bound to host IP; blocked by firewall default-drop |
 | 21            | TCP      | FTP control     | Scanner IP only                 | Pure FTP control channel for scanner uploads        |
 | 21000–21010   | TCP      | FTP passive     | Scanner IP only                 | Passive data channels; range defined in services.yml |
 
@@ -254,18 +256,19 @@ Recovery drill target:
    - Add `/var/lib/cloudyhome/nas/secrets.enc.yaml`.
    - Add renderer/apply scripts and systemd units.
 2. Implement systemd units and ordering.
-3. Implement schema + render logic for NFS and Samba first.
-4. Add iSCSI and Garage generation.
-5. Add FTP generation.
-6. Add validation and idempotent restart policy.
-7. Test:
+3. Implement schema + render logic for firewall first (required for all deployments).
+4. Add NFS and Samba generation.
+5. Add iSCSI and Garage generation.
+6. Add FTP generation.
+7. Add validation and idempotent restart policy.
+8. Test:
    - clean boot
    - repeated boot
    - missing AGE key (`/etc/sops/age/keys.txt` absent)
    - invalid template
    - invalid secrets
    - service-specific syntax errors
-8. Perform full rebuild/recovery rehearsal.
+9. Perform full rebuild/recovery rehearsal.
 
 ## 13. Open Decisions
 
@@ -297,6 +300,7 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 
 ### 14.2 Top-Level Keys
 - `version` (required, integer): schema version. Initial value: `1`.
+- `host_ip_ref` (required, string): secret path resolving to the NAS VM's LAN IP; used as bind address for all services.
 - `storage` (required, map): pool and dataset conventions.
 - `firewall` (required, map): nftables rule definitions.
 - `nfs` (optional, map): NFS export definitions.
@@ -311,6 +315,8 @@ At least one of `nfs`, `samba`, `iscsi`, `garage`, or `ftp` must be present.
 
 ```yaml
 version: 1
+
+host_ip_ref: "host/ip"              # resolves to the NAS VM's LAN IP from secrets; used as bind address for all services
 
 storage:
   pool: "zpool0"
@@ -357,7 +363,7 @@ nfs:
     - name: "media"
       path: "/zpool0/shares/media"
       clients:
-        - cidr: "10.0.0.0/24"
+        - cidr_ref: "nfs/media"      # resolves to CIDR list in secrets
           options: ["rw", "sync", "no_subtree_check"]
           identity_map:
             mode: "root_squash"      # one of: none|root_squash|all_squash|no_root_squash
@@ -387,8 +393,7 @@ samba:
 
 iscsi:
   base_iqn: "iqn.2026-03.home.arpa:nas01"
-  portals:
-    - "10.0.0.10:3260"
+  portal_port: 3260                    # bind IP resolved from host_ip_ref
   targets:
     - name: "vmstore"
       iqn_suffix: "vmstore"
@@ -411,9 +416,9 @@ garage:
   runtime: "podman-quadlet-root"
   quadlet_name: "cloudyhome-garage"
   image: "dxflrs/garage:latest"
-  rpc_bind: "10.0.0.10:3901"
-  s3_bind: "10.0.0.10:3900"
-  admin_bind: "127.0.0.1:3903"         # admin API; loopback-only by default
+  rpc_port: 3901                        # bind IP resolved from host_ip_ref
+  s3_port: 3900                         # bind IP resolved from host_ip_ref
+  admin_port: 3903                      # bind IP resolved from host_ip_ref; no firewall rule = blocked by default-drop
   s3_region: "garage"
   replication_mode: "none"              # single-node default
   data_dir: "/zpool0/system/garage/data"
@@ -427,7 +432,7 @@ ftp:
   runtime: "podman-quadlet-root"
   quadlet_name: "cloudyhome-ftp"
   image: "delfer/alpine-ftp-server:latest"
-  bind_address: "10.0.0.10"                 # maps to ADDRESS env
+  bind_address_ref: "host/ip"               # maps to ADDRESS env; resolved from secrets
   control_port: 21
   passive_ports:
     min: 21000                              # maps to MIN_PORT env
@@ -442,6 +447,7 @@ ftp:
 
 ### 14.4 Validation Rules
 - `version` must equal `1`.
+- `host_ip_ref` is required and must resolve to a valid IP address in secrets.
 - `firewall` is required; omitting it is a validation error.
 - `firewall.default_input` must be one of `drop` or `accept`.
 - `firewall.rules` must be a non-empty list.
@@ -457,7 +463,7 @@ ftp:
 - Each dataset entry must start with `/zpool0/` (mount path form).
 - Any `path` intended for data export must start with `/zpool0/`.
 - `nfs.exports[*].clients` must be non-empty when export is enabled.
-- `nfs.exports[*].clients[*].cidr` is required.
+- `nfs.exports[*].clients[*].cidr_ref` is required and must resolve to a non-empty CIDR list in secrets.
 - `nfs.exports[*].clients[*].options` is optional; defaults to `[]`.
 - `nfs.exports[*].clients[*].identity_map.mode` is optional; defaults to `root_squash`.
 - `nfs.exports[*].clients[*].identity_map.mode` must be one of:
@@ -478,7 +484,7 @@ ftp:
   - non-empty `quadlet_name`
   - non-empty `image` (Garage container image is `dxflrs/garage`; version pinning is managed in the Quadlet file, not validated here)
   - both `admin_token_ref` and `rpc_secret_ref`
-  - `admin_bind` must be specified; defaults to `127.0.0.1:3903` if omitted (loopback-only)
+  - `admin_bind` must be specified; no firewall rule is generated for it — blocked by default-drop
 - `ftp.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
@@ -494,6 +500,8 @@ ftp:
 `secrets.enc.yaml` is keyed by reference path used in `services.yml`:
 
 ```yaml
+host:
+  ip: "10.0.0.10"
 firewall:
   ssh:       ["10.0.0.0/24"]
   nfs:       ["10.0.0.0/24"]
@@ -501,6 +509,8 @@ firewall:
   iscsi:     ["10.0.0.0/24"]
   garage-s3: ["10.0.0.0/24"]
   ftp:       ["192.168.1.50"]
+nfs:
+  media:     ["10.0.0.0/24"]
 iscsi:
   vmstore:
     chap_user: "vmstore-user"
