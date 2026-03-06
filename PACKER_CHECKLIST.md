@@ -2,6 +2,42 @@
 
 Items that must be handled during Packer image build and are out of scope for the runtime boot chain.
 
+## Install packages and tools
+
+All packages below must be installed in the Packer image.
+
+System packages:
+```
+zfsutils-linux
+nfs-kernel-server
+samba
+targetcli-fb
+podman
+cloud-init
+nftables
+yq
+```
+
+Secrets tooling (install from upstream releases or distro packages):
+```
+sops
+age
+```
+
+Python runtime and libraries:
+```
+python3
+python3-pip
+```
+
+Python packages (via pip):
+```
+pyyaml
+pydantic
+jinja2
+tomli-w
+```
+
 ## Pre-pull container images
 
 Container images must be pulled into the Podman image store during Packer build so that Quadlet services can start at boot without any network dependency.
