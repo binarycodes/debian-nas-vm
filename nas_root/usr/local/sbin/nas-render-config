@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Render NAS configuration templates."""
+import fcntl
+import json
+import logging
+import os
+import sys
+
+sys.path.insert(0, "/usr/local/lib/cloudyhome")
+
+import yaml
+from cloudyhome.models import NasConfig
+from cloudyhome.secrets import secrets_context, resolve_ref
+from cloudyhome.render import render_template, atomic_write, validate_nft, validate_samba
+
+SERVICES_PATH = "/var/lib/cloudyhome/nas/services.yml"
+RUN_DIR = "/run/nas"
+LOCK_FILE = "/run/nas/render.lock"
+
+logging.basicConfig(format="%(message)s", level=logging.INFO)
+log = logging.getLogger(__name__)
+
+
+def build_context(config, secrets):
+    """Build a template context dict with all refs pre-resolved."""
+    ctx = {"config": config}
+
+    # Resolve host IP
+    ctx["host_ip"] = resolve_ref(secrets, config.host_ip_ref)
+
+    # Resolve firewall sources
+    ctx["firewall_sources"] = {}
+    for rule in config.firewall.rules:
+        sources = resolve_ref(secrets, rule.sources_ref)
+        ctx["firewall_sources"][rule.service] = sources
+
+    # NFS client CIDRs
+    if config.nfs:
+        ctx["nfs_cidrs"] = {}
+        for export in config.nfs.exports:
+            ctx["nfs_cidrs"][export.name] = {}
+            for i, client in enumerate(export.clients):
+                cidrs = resolve_ref(secrets, client.cidr_ref)
+                ctx["nfs_cidrs"][export.name][i] = cidrs
+
+    # Samba users
+    if config.samba:
+        ctx["samba_usernames"] = {}
+        for share in config.samba.shares:
+            usernames = []
+            for ref_path in share.users_ref:
+                username = ref_path.split("/")[-1]
+                usernames.append(username)
+            ctx["samba_usernames"][share.name] = usernames
+
+    # iSCSI CHAP credentials
+    if config.iscsi:
+        ctx["iscsi_chap"] = {}
+        for target in config.iscsi.targets:
+            if target.auth.session_auth == "chap" and target.auth.chap_secret_ref:
+                ctx["iscsi_chap"][target.name] = resolve_ref(secrets, target.auth.chap_secret_ref)
+
+    # Garage secrets
+    if config.garage and config.garage.enabled:
+        ctx["garage_rpc_secret"] = resolve_ref(secrets, config.garage.rpc_secret_ref)
+        ctx["garage_admin_token"] = resolve_ref(secrets, config.garage.admin_token_ref)
+
+    # FTP users
+    if config.ftp and config.ftp.enabled:
+        ftp_user_entries = []
+        for ref_path in config.ftp.users_ref:
+            username = ref_path.split("/")[-1]
+            user_data = resolve_ref(secrets, ref_path)
+            ftp_user_entries.append(f"{username}|{user_data['password']}")
+        ctx["ftp_users_env"] = ":".join(ftp_user_entries)
+
+    # Health/alert
+    if config.health and config.health.alert.enabled:
+        addresses = resolve_ref(secrets, config.health.alert.addresses_ref)
+        ctx["alert_to"] = addresses["to_address"]
+        ctx["alert_from"] = addresses["from_address"]
+        smtp_auth = resolve_ref(secrets, config.health.alert.smtp_auth_ref)
+        ctx["smtp_user"] = smtp_auth["username"]
+        ctx["smtp_password"] = smtp_auth["password"]
+    else:
+        ctx["alert_to"] = ""
+        ctx["alert_from"] = ""
+
+    return ctx
+
+
+def build_saveconfig(config, ctx):
+    """Build iSCSI saveconfig.json as a Python dict."""
+    pool = config.storage.pool
+    host_ip = ctx["host_ip"]
+    portal_port = config.iscsi.portal_port
+
+    fabric_modules = [{"name": "iscsi"}]
+    storage_objects = []
+    targets = []
+
+    for target in config.iscsi.targets:
+        if not target.enabled:
+            continue
+
+        target_iqn = f"{config.iscsi.base_iqn}:{target.iqn_suffix}"
+
+        # Build LUNs and storage objects
+        tpg_luns = []
+        for lun in target.luns:
+            backstorename = f"{target.name}_{lun.lun}"
+            dev_path = f"/dev/zvol/{pool}/{lun.path}"
+            storage_objects.append({
+                "plugin": "block",
+                "name": backstorename,
+                "dev": dev_path,
+                "readonly": lun.readonly,
+            })
+            tpg_luns.append({
+                "index": lun.lun,
+                "storage_object": f"/backstores/block/{backstorename}",
+            })
+
+        # Build ACLs from initiators
+        node_acls = []
+        for initiator in target.initiators:
+            acl = {"node_wwn": initiator, "mapped_luns": []}
+            for lun in target.luns:
+                acl["mapped_luns"].append({
+                    "index": lun.lun,
+                    "tpg_lun": lun.lun,
+                    "write_protect": lun.readonly,
+                })
+            # CHAP auth on ACL
+            if target.auth.session_auth == "chap" and target.name in ctx.get("iscsi_chap", {}):
+                chap = ctx["iscsi_chap"][target.name]
+                acl["chap_userid"] = chap["chap_user"]
+                acl["chap_password"] = chap["chap_password"]
+            node_acls.append(acl)
+
+        tpg = {
+            "tag": 1,
+            "enable": True,
+            "attributes": {
+                "authentication": 1 if target.auth.session_auth == "chap" else 0,
+                "generate_node_acls": 0 if target.initiators else 1,
+            },
+            "portals": [{"ip_address": host_ip, "port": portal_port}],
+            "luns": tpg_luns,
+            "node_acls": node_acls,
+        }
+
+        targets.append({
+            "wwn": target_iqn,
+            "fabric": "iscsi",
+            "tpgs": [tpg],
+        })
+
+    return {
+        "fabric_modules": fabric_modules,
+        "storage_objects": storage_objects,
+        "targets": targets,
+    }
+
+
+def main():
+    os.makedirs(RUN_DIR, exist_ok=True)
+    lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.error("Another render process is running")
+        sys.exit(1)
+
+    try:
+        with open(SERVICES_PATH) as f:
+            raw = yaml.safe_load(f)
+        config = NasConfig(**raw)
+
+        with secrets_context() as secrets:
+            ctx = build_context(config, secrets)
+
+            # --- Render firewall ---
+            content = render_template("nftables.conf.j2", ctx)
+            atomic_write(content, "/etc/nftables.conf", mode=0o644, validator=validate_nft)
+
+            # --- NFS exports ---
+            if config.nfs:
+                content = render_template("exports.j2", ctx)
+                atomic_write(content, "/etc/exports.d/cloudyhome.exports", mode=0o644)
+
+            # --- Samba ---
+            if config.samba:
+                content = render_template("smb.conf.j2", ctx)
+                atomic_write(content, "/etc/samba/smb.conf", mode=0o644, validator=validate_samba)
+
+            # --- iSCSI saveconfig.json (direct JSON, not Jinja2) ---
+            if config.iscsi:
+                saveconfig = build_saveconfig(config, ctx)
+                content = json.dumps(saveconfig, indent=2) + "\n"
+                atomic_write(content, "/etc/target/saveconfig.json", mode=0o600)
+
+            # --- Garage ---
+            if config.garage:
+                content = render_template("garage.toml.j2", ctx)
+                atomic_write(content, f"{config.garage.config_dir}/garage.toml", mode=0o600)
+                content = render_template("cloudyhome-garage.container.j2", ctx)
+                atomic_write(content, "/etc/containers/systemd/cloudyhome-garage.container", mode=0o644)
+
+            # --- FTP ---
+            if config.ftp:
+                content = render_template("ftp.env.j2", ctx)
+                atomic_write(content, f"{config.ftp.config_dir}/ftp.env", mode=0o600)
+                content = render_template("cloudyhome-ftp.container.j2", ctx)
+                atomic_write(content, "/etc/containers/systemd/cloudyhome-ftp.container", mode=0o644)
+
+            # --- Health alert config (always rendered) ---
+            content = render_template("alert.conf.j2", ctx)
+            atomic_write(content, "/etc/cloudyhome/health/alert.conf", mode=0o600)
+
+            # --- msmtprc (only when alerting enabled) ---
+            if config.health and config.health.alert.enabled:
+                content = render_template("msmtprc.j2", ctx)
+                atomic_write(content, "/etc/msmtprc", mode=0o600)
+
+            # --- Apply services script (always rendered) ---
+            content = render_template("nas-apply-services.sh.j2", ctx)
+            atomic_write(content, "/etc/cloudyhome/nas-apply-services.sh", mode=0o755)
+
+        log.info("All templates rendered successfully")
+
+    except Exception as e:
+        log.error("Render failed: %s", e)
+        sys.exit(1)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+
+
+if __name__ == "__main__":
+    main()

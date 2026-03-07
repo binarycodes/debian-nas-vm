@@ -1,0 +1,14 @@
+[Unit]
+Description=Validate NAS configuration and secrets
+After=cloud-init.target
+Requires=cloud-init.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=nas
+Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
+ExecStart=/usr/local/sbin/nas-validate-config
+
+[Install]
+WantedBy=multi-user.target

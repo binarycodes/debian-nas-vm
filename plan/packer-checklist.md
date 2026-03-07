@@ -83,7 +83,7 @@ systemctl disable nfs-server smbd target
 Packer does **not** enable any NAS-related services. All service enabling is handled by the project deliverables source tree:
 
 - **Custom cloudyhome units** (`cloudyhome-nas-validate.service`, `cloudyhome-zfs-import.service`, `cloudyhome-nas-render.service`, `cloudyhome-nas-firewall.service`, `cloudyhome-nas-apply.service`, `cloudyhome-zfs-scrub.timer`): enabled by `WantedBy` symlinks included in the source tree (e.g. `multi-user.target.wants/cloudyhome-nas-validate.service → ../cloudyhome-nas-validate.service`). Packer copies these symlinks into place alongside the unit files — no `systemctl enable` required.
-- **Stock services** (`smartd.service`, `zfs-zed.service`): enabled by a post-install script included in the deliverables source tree, run as the final Packer provisioning step.
+- **Stock services** (`smartd.service`, `zfs-zed.service`): enabled at runtime by `nas-apply-config` during the apply phase. Packer does not enable these — they should only run after the NAS boot chain has imported the pool and rendered config.
 - `cloudyhome-garage-bootstrap.service` is intentionally NOT enabled — it has no `WantedBy=` and is driven exclusively by the rendered `nas-apply-services.sh` script.
 
 Packer only enables generic infrastructure services (networking, SSH, NTP, etc.).

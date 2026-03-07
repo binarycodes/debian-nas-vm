@@ -1,0 +1,43 @@
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy {{ config.firewall.default_input }};
+
+        # Allow established/related connections
+        ct state established,related accept
+
+        # Allow loopback
+        iifname "lo" accept
+
+        # ICMPv4 echo request (ping)
+        ip protocol icmp icmp type echo-request accept
+{% for rule in config.firewall.rules %}
+{% set sources = firewall_sources[rule.service] %}
+{% for src in sources %}
+{% set src_cidr = src if '/' in src else src ~ '/32' %}
+{% if rule.ports is not none %}
+{% for port in rule.ports %}
+{% for proto in rule.proto %}
+        {{ proto }} dport {{ port }} ip saddr {{ src_cidr }} accept comment "{{ rule.service }}"
+{% endfor %}
+{% endfor %}
+{% elif rule.port_range is not none %}
+{% for proto in rule.proto %}
+        {{ proto }} dport {{ rule.port_range[0] }}-{{ rule.port_range[1] }} ip saddr {{ src_cidr }} accept comment "{{ rule.service }}"
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

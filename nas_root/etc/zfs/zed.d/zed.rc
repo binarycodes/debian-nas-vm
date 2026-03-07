@@ -1,0 +1,12 @@
+ZED_NOTIFY_VERBOSE=1
+ZED_NOTIFY_DATA=1
+ZED_SYSLOG_TAG="zed"
+ZED_SYSLOG_SUBCLASS_INCLUDE="scrub_finish,statechange,io_error,resilver_finish"
+
+# Disable built-in email - alert delivery handled by the alert script
+ZED_EMAIL_ADDR=""
+ZED_EMAIL_PROG=""
+
+# Disable unused built-in notification methods
+ZED_PUSHBULLET_ACCESS_TOKEN=""
+ZED_NTFY_URL=""

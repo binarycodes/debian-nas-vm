@@ -1,0 +1,157 @@
+version: 1
+
+host_ip_ref: "host/ip"
+
+storage:
+  pool: "zpool0"
+  datasets:
+    system:
+      path: "/zpool0/system"
+      quota: "10G"
+    system_garage:
+      path: "/zpool0/system/garage"
+      quota: "50G"
+    system_garage_data:
+      path: "/zpool0/system/garage/data"
+      quota: "500G"
+    system_garage_meta:
+      path: "/zpool0/system/garage/meta"
+      quota: "10G"
+    shares:
+      path: "/zpool0/shares"
+      quota: "5T"
+    shares_media:
+      path: "/zpool0/shares/media"
+      quota: "4T"
+    shares_scanner_inbox:
+      path: "/zpool0/shares/scanner-inbox"
+      quota: "50G"
+    iscsi:
+      path: "/zpool0/iscsi"
+      quota: "500G"
+    backups:
+      path: "/zpool0/backups"
+      quota: "2T"
+
+firewall:
+  default_input: "drop"
+  rules:
+    - service: "ssh"
+      ports: [22]
+      proto: ["tcp"]
+      sources_ref: "firewall/ssh"
+    - service: "nfs"
+      ports: [2049]
+      proto: ["tcp"]
+      sources_ref: "firewall/nfs"
+    - service: "samba"
+      ports: [445]
+      proto: ["tcp"]
+      sources_ref: "firewall/samba"
+    - service: "iscsi"
+      ports: [3260]
+      proto: ["tcp"]
+      sources_ref: "firewall/iscsi"
+    - service: "garage-s3"
+      ports: [3900]
+      proto: ["tcp"]
+      sources_ref: "firewall/garage-s3"
+    - service: "ftp"
+      ports: [21]
+      proto: ["tcp"]
+      sources_ref: "firewall/ftp"
+    - service: "ftp-passive"
+      port_range: [21000, 21010]
+      proto: ["tcp"]
+      sources_ref: "firewall/ftp"
+
+nfs:
+  version: 4
+  exports:
+    - name: "media"
+      path: "/zpool0/shares/media"
+      clients:
+        - cidr_ref: "nfs/media"
+          options: ["rw", "sync", "no_subtree_check"]
+          identity_map:
+            mode: "root_squash"
+      options: []
+      enabled: true
+
+samba:
+  global:
+    workgroup: "WORKGROUP"
+    server_string: "CloudyHome NAS"
+    min_protocol: "SMB3_11"
+  shares:
+    - name: "media"
+      path: "/zpool0/shares/media"
+      browsable: true
+      read_only: false
+      guest_ok: false
+      users_ref: ["samba/users/smb_alice"]
+      write_list: []
+      force_user: ""
+      force_group: ""
+      create_mask: "0660"
+      directory_mask: "0770"
+      enabled: true
+
+iscsi:
+  base_iqn: "iqn.2026-03.home.arpa:nas01"
+  portal_port: 3260
+  targets:
+    - name: "vmstore"
+      iqn_suffix: "vmstore"
+      luns:
+        - lun: 0
+          type: "zvol"
+          path: "iscsi/vmstore"
+          size: "100G"
+          readonly: false
+      auth:
+        discovery_auth: "none"
+        session_auth: "chap"
+        chap_secret_ref: "iscsi/vmstore"
+      initiators:
+        - "iqn.1993-08.org.debian:client1"
+      enabled: true
+
+garage:
+  enabled: true
+  runtime: "podman-quadlet-root"
+  quadlet_name: "cloudyhome-garage"
+  image: "dxflrs/garage:latest"
+  rpc_port: 3901
+  s3_port: 3900
+  admin_port: 3903
+  s3_region: "garage"
+  replication_mode: "none"
+  config_dir: "/etc/cloudyhome/garage"
+  data_dir: "/zpool0/system/garage/data"
+  metadata_dir: "/zpool0/system/garage/meta"
+  layout_capacity: "1G"
+  admin_token_ref: "garage/admin_token"
+  rpc_secret_ref: "garage/rpc_secret"
+
+ftp:
+  enabled: true
+  runtime: "podman-quadlet-root"
+  quadlet_name: "cloudyhome-ftp"
+  image: "delfer/alpine-ftp-server:latest"
+  config_dir: "/etc/cloudyhome/ftp"
+  control_port: 21
+  passive_ports:
+    min: 21000
+    max: 21010
+  users_ref: ["ftp/users/scanner1"]
+  upload_root: "/zpool0/shares/scanner-inbox"
+
+health:
+  alert:
+    enabled: true
+    smtp_host: "smtp.example.com"
+    smtp_port: 587
+    smtp_tls: "starttls"
+    smtp_auth_ref: "health/smtp_auth"
+    addresses_ref: "health/addresses"

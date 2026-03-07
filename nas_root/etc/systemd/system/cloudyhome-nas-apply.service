@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply NAS configuration (datasets, users, services)
+After=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service
+Requires=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=nas
+Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
+ExecStart=/usr/local/sbin/nas-apply-config
+
+[Install]
+WantedBy=multi-user.target

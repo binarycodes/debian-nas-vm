@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Bootstrap Garage layout assignment."""
+import json
+import logging
+import sys
+import time
+import urllib.request
+import urllib.error
+
+sys.path.insert(0, "/usr/local/lib/cloudyhome")
+
+import yaml
+from cloudyhome.secrets import secrets_context, resolve_ref
+
+SERVICES_PATH = "/var/lib/cloudyhome/nas/services.yml"
+
+logging.basicConfig(format="%(message)s", level=logging.INFO)
+log = logging.getLogger(__name__)
+
+MAX_ATTEMPTS = 30
+POLL_INTERVAL = 1
+
+
+def api_request(url, token, method="GET"):
+    """Make an authenticated request to the Garage admin API."""
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def run_podman_exec(args):
+    """Run a command inside the Garage container."""
+    import subprocess
+    cmd = ["podman", "exec", "cloudyhome-garage", "garage"] + args
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"podman exec failed: {' '.join(cmd)}\n{result.stderr}")
+    return result.stdout
+
+
+def main():
+    with open(SERVICES_PATH) as f:
+        raw = yaml.safe_load(f)
+
+    garage = raw.get("garage", {})
+    if not garage or not garage.get("enabled"):
+        log.info("Garage not enabled, skipping bootstrap")
+        return
+
+    admin_port = garage["admin_port"]
+    layout_capacity = garage["layout_capacity"]
+    admin_token_ref = garage["admin_token_ref"]
+
+    with secrets_context() as secrets:
+        admin_token = resolve_ref(secrets, admin_token_ref)
+
+        # Resolve host IP for API calls
+        host_ip_ref = raw["host_ip_ref"]
+        host_ip = resolve_ref(secrets, host_ip_ref)
+        base_url = f"http://{host_ip}:{admin_port}"
+
+        # Wait for Garage to be ready
+        log.info("Waiting for Garage to become ready...")
+        status = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                status = api_request(f"{base_url}/v1/status", admin_token)
+                log.info("Garage is ready (attempt %d/%d)", attempt, MAX_ATTEMPTS)
+                break
+            except (urllib.error.URLError, ConnectionError, OSError) as e:
+                if attempt == MAX_ATTEMPTS:
+                    log.error("Garage did not become ready after %d attempts", MAX_ATTEMPTS)
+                    sys.exit(1)
+                time.sleep(POLL_INTERVAL)
+
+        # Get node ID from status
+        node_id = status["node"]
+        log.info("Local node ID: %s", node_id)
+
+        # Check layout
+        layout = api_request(f"{base_url}/v1/layout", admin_token)
+        current_version = layout.get("version", 0)
+        roles = layout.get("roles", [])
+
+        if roles:
+            log.info("Layout already has roles assigned, skipping")
+            return
+
+        # Assign layout
+        log.info("Assigning layout with capacity %s", layout_capacity)
+        run_podman_exec(["layout", "assign", "-z", "garage", "-c", layout_capacity, node_id])
+
+        # Apply layout
+        next_version = current_version + 1
+        log.info("Applying layout version %d", next_version)
+        run_podman_exec(["layout", "apply", "--version", str(next_version)])
+
+        log.info("Garage bootstrap completed successfully")
+
+
+if __name__ == "__main__":
+    main()

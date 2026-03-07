@@ -1,0 +1,149 @@
+"""Tests for shell scripts - syntax check and content validation."""
+import os
+import subprocess
+
+import pytest
+
+NAS_ROOT = os.path.join(os.path.dirname(__file__), "..", "nas_root")
+SBIN_DIR = os.path.join(NAS_ROOT, "usr", "local", "sbin")
+
+
+class TestShellSyntax:
+    """Verify all shell scripts pass bash -n syntax check."""
+
+    SHELL_SCRIPTS = [
+        "nas-zfs-import",
+        "nas-health-alert",
+        "nas-zedlet-wrapper",
+    ]
+
+    @pytest.mark.parametrize("script", SHELL_SCRIPTS)
+    def test_syntax(self, script):
+        path = os.path.join(SBIN_DIR, script)
+        result = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
+        assert result.returncode == 0, f"Syntax error in {script}: {result.stderr}"
+
+
+class TestPythonSyntax:
+    """Verify all Python scripts pass py_compile."""
+
+    PYTHON_SCRIPTS = [
+        "nas-validate-config",
+        "nas-render-config",
+        "nas-apply-config",
+        "nas-garage-bootstrap",
+    ]
+
+    @pytest.mark.parametrize("script", PYTHON_SCRIPTS)
+    def test_syntax(self, script):
+        path = os.path.join(SBIN_DIR, script)
+        result = subprocess.run(
+            ["python3", "-c", f"import py_compile; py_compile.compile('{path}', doraise=True)"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"Syntax error in {script}: {result.stderr}"
+
+
+class TestZfsImportScript:
+    def test_has_sops_env(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt" in content
+
+    def test_checks_disk_presence(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "/dev/disk/by-id/" in content
+        assert "MISSING" in content
+
+    def test_aborts_on_missing_disks(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert 'exit 1' in content
+        assert "One or more disks are missing" in content
+
+    def test_set_euo_pipefail(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "set -euo pipefail" in content
+
+    def test_cleanup_trap(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "trap cleanup EXIT" in content
+
+
+class TestHealthAlertScript:
+    def test_set_euo_pipefail(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        assert "set -euo pipefail" in content
+
+    def test_sources_alert_conf(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        assert "/etc/cloudyhome/health/alert.conf" in content
+
+    def test_handles_smartd_source(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        assert "SMARTD_DEVICE" in content
+        assert "SMARTD_FAILTYPE" in content
+
+    def test_handles_zed_source(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        assert "ZEVENT_CLASS" in content
+        assert "ZEVENT_SUBCLASS" in content
+
+    def test_journal_logging(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        assert "logger -t nas-health-alert" in content
+
+    def test_email_conditional(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        assert 'ALERT_ENABLED' in content
+        assert "msmtp" in content
+
+    def test_severity_classification(self):
+        path = os.path.join(SBIN_DIR, "nas-health-alert")
+        content = open(path).read()
+        for severity in ("critical", "warning", "info"):
+            assert severity in content
+
+
+class TestZedletWrapper:
+    def test_delegates_to_health_alert(self):
+        path = os.path.join(SBIN_DIR, "nas-zedlet-wrapper")
+        content = open(path).read()
+        assert "/usr/local/sbin/nas-health-alert" in content
+
+
+class TestSmartdConf:
+    def test_devicescan(self):
+        path = os.path.join(NAS_ROOT, "etc", "smartd.conf")
+        content = open(path).read()
+        assert "DEVICESCAN" in content
+        assert "/usr/local/sbin/nas-health-alert" in content
+
+    def test_schedule(self):
+        path = os.path.join(NAS_ROOT, "etc", "smartd.conf")
+        content = open(path).read()
+        # Short self-test and long self-test schedules present
+        assert "-s" in content
+
+
+class TestZedRc:
+    def test_syslog_subclasses(self):
+        path = os.path.join(NAS_ROOT, "etc", "zfs", "zed.d", "zed.rc")
+        content = open(path).read()
+        for subclass in ("scrub_finish", "statechange", "io_error", "resilver_finish"):
+            assert subclass in content
+
+    def test_email_disabled(self):
+        path = os.path.join(NAS_ROOT, "etc", "zfs", "zed.d", "zed.rc")
+        content = open(path).read()
+        assert 'ZED_EMAIL_ADDR=""' in content
+        assert 'ZED_EMAIL_PROG=""' in content

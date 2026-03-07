@@ -1,0 +1,10 @@
+[Unit]
+Description=Bootstrap Garage layout assignment
+After=cloudyhome-garage.service
+Wants=cloudyhome-garage.service
+
+[Service]
+Type=oneshot
+RuntimeDirectory=nas
+Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
+ExecStart=/usr/local/sbin/nas-garage-bootstrap
