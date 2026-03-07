@@ -2,6 +2,8 @@
 
 Items that must be handled during Packer image build and are out of scope for the runtime boot chain. The project deliverables (scripts, units, templates, config files) are baked into the image by Packer from the source tree; this checklist covers the prerequisites and image-level configuration that the PLAN.md boot chain depends on.
 
+**Important**: The `nas_root/` source tree contains symlinks (systemd `WantedBy` symlinks, ZEDLET symlinks) with relative or absolute targets that may not resolve on the build machine. Packer must copy the tree using a symlink-preserving method (`cp -a`, `rsync -a`, or Packer's `file` provisioner). Do **not** dereference symlinks during copy.
+
 ## 1. Install packages and tools
 
 All packages below must be installed in the Packer image.
@@ -88,14 +90,9 @@ Packer only enables generic infrastructure services (networking, SSH, NTP, etc.)
 
 ## 6. ZEDLET symlinks
 
-ZED matches scripts to event classes by filename prefix. Four symlinks must be created in `/etc/zfs/zed.d/`, all pointing to `/usr/local/sbin/nas-zedlet-wrapper`:
+ZEDLET symlinks are included in the `nas_root/` source tree (see PLAN.md Section 16) and copied into the image alongside all other deliverables. No manual `ln -s` commands are needed.
 
-```
-ln -s /usr/local/sbin/nas-zedlet-wrapper /etc/zfs/zed.d/statechange-nas-health-alert.sh
-ln -s /usr/local/sbin/nas-zedlet-wrapper /etc/zfs/zed.d/scrub_finish-nas-health-alert.sh
-ln -s /usr/local/sbin/nas-zedlet-wrapper /etc/zfs/zed.d/io-nas-health-alert.sh
-ln -s /usr/local/sbin/nas-zedlet-wrapper /etc/zfs/zed.d/resilver_finish-nas-health-alert.sh
-```
+The source tree contains symlinks with absolute targets (e.g., `statechange-nas-health-alert.sh → /usr/local/sbin/nas-zedlet-wrapper`). These targets do not resolve on the build machine — that is expected. Packer must copy the source tree with a symlink-preserving method (`cp -a`, `rsync -a`, or Packer's `file` provisioner which preserves symlinks by default). Do **not** use a copy method that follows/dereferences symlinks.
 
 The target script (`nas-zedlet-wrapper`) is placed outside `/etc/zfs/zed.d/` to avoid being executed directly by ZED as an `all-` script.
 
