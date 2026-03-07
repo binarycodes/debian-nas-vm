@@ -304,12 +304,13 @@ Core behavior:
   3. Run validation against the temp file (e.g. `testparm -s <tempfile>`).
   4. Only on validation success: compare the temp file against the existing destination using `filecmp.cmp(tmp, dest, shallow=False)` (Python) or `cmp -s` (shell). If the content is identical, discard the temp file. If different (or the destination does not yet exist), `chmod`/`chown` the temp file, then `mv` it atomically to the final `/etc` path.
   5. On validation failure: delete the temp file and exit non-zero. The live `/etc` file is never touched.
+- **Per-item enabled filtering**: NFS exports, Samba shares, and iSCSI targets each have an `enabled` field (optional, default `true`). Items with `enabled=false` are excluded from the rendered config file entirely — they do not appear in `/etc/exports.d/cloudyhome.exports`, `/etc/samba/smb.conf`, or `/etc/target/saveconfig.json` respectively. This is enforced at the render level because NFS, Samba, and iSCSI have no native per-item enable/disable mechanism. Disabled items remain in `services.yml` for documentation and can be re-enabled without rewriting the schema.
 - For each container service (`garage`, `ftp`) whose key is present in `services.yml`, render the Quadlet `.container` file into `/etc/containers/systemd/` using the same temp-file + compare + atomic-move pattern, regardless of the `enabled` field. These files are generated from Pydantic-validated input and do not require a separate runtime validator.
 - `testparm -s` validates the Samba config; `nft -c -f <tempfile>` validates the nftables config as a dry-run before promotion to `/etc/nftables.conf`. All other outputs are trusted from Pydantic-validated input and do not require a separate runtime validator.
 - Permissions are set on the temp file before the atomic move (step 4 above); `mv` preserves them:
-  - `0600 root:root`: `garage.toml`, `ftp.env`, `/etc/target/saveconfig.json`, `/etc/msmtprc` (contain resolved secret values)
+  - `0600 root:root`: `garage.toml`, `ftp.env`, `/etc/target/saveconfig.json`, `/etc/msmtprc`, `/etc/cloudyhome/health/alert.conf` (contain resolved secret values)
   - `0755 root:root`: `/etc/cloudyhome/nas-apply-services.sh` (rendered script, no secret content)
-  - `0644 root:root`: `/etc/nftables.conf`, `/etc/exports.d/cloudyhome.exports`, `/etc/samba/smb.conf`, Quadlet `.container` files, `/etc/cloudyhome/health/alert.conf` (no secret content)
+  - `0644 root:root`: `/etc/nftables.conf`, `/etc/exports.d/cloudyhome.exports`, `/etc/samba/smb.conf`, Quadlet `.container` files (no secret content)
 - Exit non-zero on any failed validation.
 
 Idempotency (hard requirement):
@@ -327,7 +328,7 @@ Idempotency (hard requirement):
 - iSCSI target/LUN mapping
 - Garage network and non-secret parameters
 - FTP listeners, passive port range, and upload policy
-- Health alert settings (SMTP host, port, TLS mode, addresses)
+- Health alert settings (SMTP host, port, TLS mode)
 
 `secrets.enc.yaml` defines sensitive values:
 - Disk IDs for passthrough verification (`disks/ids`)
@@ -339,6 +340,8 @@ Idempotency (hard requirement):
 - Garage RPC secret and admin token
 - FTP local/virtual account credentials
 - SMTP relay credentials (health alerting)
+- Alert email addresses (health alerting)
+- Allowed email domains (`allowed_email_domains`; enforced globally across all email fields)
 
 Renderer contract:
 - Strict schema validation before writing `/etc`.
@@ -350,7 +353,7 @@ Controls:
 - AGE private key delivered via cloud-init `write_files` — never in process args, environment, or shell history.
 - Any service that needs secrets decrypts independently: SOPS → temp file under `/run` (tmpfs) → use → guaranteed cleanup on exit. No service depends on another's decryption output.
 - Decrypted temp files exist only for the lifetime of the process that created them; removed unconditionally on exit.
-- Restrictive ownership and modes on generated `/etc` files (files containing resolved secrets — `garage.toml`, `ftp.env`, `saveconfig.json`, `msmtprc` — are `0600 root:root`).
+- Restrictive ownership and modes on generated `/etc` files (files containing resolved secrets — `garage.toml`, `ftp.env`, `saveconfig.json`, `msmtprc`, `alert.conf` — are `0600 root:root`).
 - Journald/logging avoids printing secret values.
 
 Risk notes:
@@ -395,7 +398,7 @@ Deliverable scope (this project):
 - Static config files baked into image: `/etc/smartd.conf`, `/etc/zfs/zed.d/zed.rc`, ZEDLET symlinks
 - `services.yml` canonical example (baked into image by Packer)
 - `secrets.enc.yaml` schema example (encrypted and baked into image by Packer)
-- `PACKER_CHECKLIST.md` — mandatory Packer build steps (package installs, container image pre-pull, stock ZFS service masking, NFS/Samba disable, ZEDLET symlinks, script permissions, static configs, AGE key permissions)
+- `PACKER_CHECKLIST.md` — mandatory Packer build steps (package installs, container image pre-pull, stock ZFS service masking, NFS/Samba/iSCSI disable, ZEDLET symlinks, script permissions, static configs, AGE key permissions)
 - All files are placed under a source tree that Packer copies into the image
 - The source tree includes `WantedBy` symlinks for all custom cloudyhome units (e.g. `multi-user.target.wants/cloudyhome-nas-validate.service`), so they are enabled by file placement when Packer copies the tree — no `systemctl enable` required. Stock services (`smartd.service`, `zfs-zed.service`) are enabled by a post-install script included in the source tree.
 
@@ -441,7 +444,7 @@ Recovery drill target:
 - Render/config generation language: **Python**. Strict schema validation via `pydantic`; no config is written unless all validation passes. Libraries: `pyyaml`, `pydantic`, `jinja2`, `tomli-w`.
 - iSCSI backend: **direct JSON generation**. The renderer builds `/etc/target/saveconfig.json` from `services.yml` + secrets. `target.service` (rtslib-fb) restores from it on boot. No `targetcli` interactive session involved.
 - **NFS and Samba run as host services** (`nfs-kernel-server`, `smbd`), not containers. NFS is a kernel subsystem; containerizing it provides no isolation benefit and adds significant complexity. Samba follows the same decision for consistency. The VM is the isolation boundary. Garage and FTP remain containerized as Podman Quadlets.
-- **NFS and Samba start handling**: the rendered `nas-apply-services.sh` script uses `systemctl reload-or-restart` for both `nfs-server.service` and `smbd.service`, but only when the corresponding service is present in `services.yml`. This correctly handles both cases: starts the service if stopped, reloads/restarts if already running. The apply chain does not rely on or assume any prior state of these services. The Packer image may disable their auto-start as a best-effort measure, but the boot chain is correct regardless of whether they were pre-running or not. If `nfs` or `samba` is absent from `services.yml`, the corresponding `systemctl` command is not included in the rendered script and the service is never started.
+- **NFS, Samba, and iSCSI start handling**: the rendered `nas-apply-services.sh` script uses `systemctl reload-or-restart` for `nfs-server.service` and `smbd.service`, and `systemctl restart` for `target.service`, but only when the corresponding service is present in `services.yml`. This correctly handles both cases: starts the service if stopped, reloads/restarts if already running. The apply chain does not rely on or assume any prior state of these services. The Packer image disables their auto-start as a best-effort measure, but the boot chain is correct regardless of whether they were pre-running or not. If `nfs`, `samba`, or `iscsi` is absent from `services.yml`, the corresponding `systemctl` command is not included in the rendered script and the service is never started.
 
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
@@ -581,7 +584,7 @@ iscsi:
         chap_secret_ref: "iscsi/vmstore" # key in secrets file
       initiators:
         - "iqn.1993-08.org.debian:client1"  # empty list means no initiator is allowed (deny all)
-      enabled: true
+      enabled: true                    # optional, default true
 
 garage:
   enabled: true
@@ -623,13 +626,14 @@ health:
     smtp_port: 587                            # SMTP relay port (587 for STARTTLS, 465 for implicit TLS)
     smtp_tls: "starttls"                      # one of: starttls | tls | off
     smtp_auth_ref: "health/smtp_auth"         # key in secrets file; resolves to map with username and password
-    from_address: "nas@example.com"           # envelope sender
-    to_address: "admin@example.com"           # recipient for all alerts
+    addresses_ref: "health/addresses"         # key in secrets file; resolves to map with from_address and to_address
 ```
 
 ### 14.4 Validation Rules
 
 **Global IP policy**: Every IP address or CIDR resolved anywhere in `services.yml` or `secrets.enc.yaml` must be a valid RFC1918 address (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). This applies to `host_ip_ref`, all `sources_ref` lists, all `cidr_ref` lists, and any other IP value. Non-RFC1918 values fail validation regardless of where they appear.
+
+**Global email domain policy**: When `health.alert.enabled=true`, every value that represents an email address anywhere in `secrets.enc.yaml` must have its domain part (everything after `@`) match one of the entries in the top-level `allowed_email_domains` list in secrets. Comparison is case-insensitive. This applies to `health.addresses.from_address`, `health.addresses.to_address`, and any other email address field. `health.smtp_auth.username` is exempt — it is an authentication credential, not an email address. Validation fails if any email address uses a domain not in the allowed list. `allowed_email_domains` must be a non-empty list of non-empty strings when `health.alert.enabled=true`; it may be absent or omitted when alerting is disabled or `health` is not configured.
 
 - `disks.ids` in secrets must be a non-empty list of non-empty strings. Empty list or absent key is a fatal error. (Runtime disk presence verification — checking that `/dev/disk/by-id/<id>` exists for each entry — is performed by `cloudyhome-zfs-import.service` (Section 6.2), not by schema validation.)
 - `version` must equal `1`.
@@ -655,7 +659,8 @@ health:
 - `nfs.exports` must be a non-empty list when `nfs` is present.
 - `nfs.exports[*].name` must be unique.
 - `nfs.exports[*].path` must be unique.
-- `nfs.exports[*].clients` must be non-empty when export is enabled.
+- `nfs.exports[*].enabled` is optional; defaults to `true`. When `false`, the export is excluded from the rendered `/etc/exports.d/cloudyhome.exports` — the renderer skips it entirely. Validation of the export's fields still applies (the item must be fully specified), except where explicitly relaxed below.
+- `nfs.exports[*].clients` must be non-empty when export is enabled. When `enabled=false`, clients may be empty.
 - `nfs.exports[*].clients[*].cidr_ref` is required and must resolve to a non-empty CIDR list in secrets (RFC1918 enforced by global IP policy).
 - `nfs.exports[*].options` is optional; defaults to `[]`. These are the default NFS options for the export. When a client block also specifies `options`, the client-level options replace the export-level defaults entirely (no merge).
 - `nfs.exports[*].clients[*].options` is optional; defaults to `[]`. When present and non-empty, overrides the export-level `options` for that client block. When absent or empty, the export-level `options` apply.
@@ -668,17 +673,19 @@ health:
 - `nfs.exports[*].clients[*].options` and `nfs.exports[*].options` must not contain identity mapping directives (`root_squash`, `no_root_squash`, `all_squash`, or any option matching `anonuid=*` or `anongid=*`). These are handled exclusively by the `identity_map` structured field; including them in `options` would produce duplicate NFS export options.
 - `samba.global.min_protocol` must be `"SMB3_11"`. SMB1, SMB2, and legacy NetBIOS are not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `samba.shares` must be a non-empty list when `samba` is present.
+- `samba.shares[*].enabled` is optional; defaults to `true`. When `false`, the share is excluded from the rendered `/etc/samba/smb.conf` — the renderer skips it entirely. Validation of the share's fields still applies (the item must be fully specified), except where explicitly relaxed below.
 - `samba.shares[*].name` must be unique.
 - `samba.users` in secrets must be a non-empty map with unique keys (each key is a username).
-- `samba.shares[*].users_ref` must be a non-empty list of ref path strings. Each path must resolve to an entry in the `samba.users` map in secrets (e.g., `"samba/users/smb_alice"` resolves to the `smb_alice` key). Unresolvable paths fail closed.
+- `samba.shares[*].users_ref` must be a non-empty list of ref path strings when share is enabled. When `enabled=false`, `users_ref` may be empty. Each path must resolve to an entry in the `samba.users` map in secrets (e.g., `"samba/users/smb_alice"` resolves to the `smb_alice` key). Unresolvable paths fail closed.
 - All Samba usernames (`samba.users` keys in secrets) must be prefixed with `smb_`. This ensures Samba system accounts are clearly namespaced and cannot collide with other OS users.
 - `iscsi.targets` must be a non-empty list when `iscsi` is present.
+- `iscsi.targets[*].enabled` is optional; defaults to `true`. When `false`, the target is excluded from the rendered `/etc/target/saveconfig.json` — the renderer skips it entirely. Validation of the target's fields still applies (the item must be fully specified), except where explicitly relaxed below.
 - `iscsi.base_iqn` is required when `iscsi` is present and must be a non-empty string in valid IQN format (`iqn.YYYY-MM.<domain>:<string>`).
 - `iscsi.portal_port` is required when `iscsi` is present and must be a valid port number in the range 1001–65535.
 - `iscsi.targets[*].name` must be unique.
 - `iscsi.targets[*].iqn_suffix` must be non-empty.
 - `iscsi.targets[*].iqn_suffix` must be unique across all targets (duplicate suffixes produce duplicate IQNs).
-- `iscsi.targets[*].luns` must be a non-empty list.
+- `iscsi.targets[*].luns` must be a non-empty list when target is enabled. When `enabled=false`, `luns` may be empty.
 - `iscsi.targets[*].luns[*].lun` must be unique per target.
 - `iscsi.targets[*].luns[*].path` must be unique across all targets.
 - `iscsi.targets[*].initiators` defaults to deny-all when empty. The renderer must not allow implicit open access — an empty list is valid and means no initiator is permitted.
@@ -720,15 +727,18 @@ health:
   - `smtp_port` — valid port number in range 1–65535.
   - `smtp_tls` — must be one of `starttls`, `tls`, or `off`.
   - `smtp_auth_ref` — must resolve to a map in secrets with two non-empty string fields: `username` and `password`.
-  - `from_address` — non-empty string containing `@`.
-  - `to_address` — non-empty string containing `@`.
+  - `addresses_ref` — must resolve to a map in secrets with two non-empty string fields: `from_address` and `to_address` (both must contain `@`).
 - Email addresses are not fully validated at schema level (RFC5321 validation is impractical). The `@` check catches obvious misconfigurations; actual deliverability is verified during the first real alert.
+- All email addresses are subject to the global email domain policy (see above).
 
 ### 14.5 Secrets Mapping Contract
 
-`secrets.enc.yaml` is keyed by reference path used in `services.yml`:
+`secrets.enc.yaml` contains both reference-path-keyed values (resolved via `_ref` fields in `services.yml`) and standalone top-level keys (`allowed_email_domains`, `disks.ids`) accessed directly by the validator and import scripts:
 
 ```yaml
+allowed_email_domains:                           # required when health.alert.enabled=true; may be omitted otherwise
+  - "example.com"
+
 disks:
   ids:
     - "ata-WDC_WD40EFRX-68N32N0_WD-XXXXXXXX"   # disk 1 — stable by-id name, no /dev/disk/by-id/ prefix
@@ -769,6 +779,9 @@ health:
   smtp_auth:
     username: "nas@example.com"
     password: "REDACTED"
+  addresses:
+    from_address: "nas@example.com"
+    to_address: "admin@example.com"
 ```
 
 Note: `delfer/alpine-ftp-server` accepts `user|pass|uid|gid|homedir` but all fields after `password` are optional. This deployment uses only username and password. The renderer resolves each `users_ref` path to an entry in the `ftp.users` map and constructs the `USERS` env var as `user1|pass1:user2|pass2:...`.
@@ -795,7 +808,7 @@ Three subsystems provide storage health automation:
 2. **SMART monitoring** — `smartd` runs scheduled self-tests and monitors disk health attributes.
 3. **ZFS Event Daemon (ZED)** — reacts to pool state changes, scrub results, and I/O errors in real time.
 
-All three feed into a single alert script (`/usr/local/sbin/nas-health-alert`) that logs to the systemd journal and delivers email notifications via `msmtp`. The alert script config is rendered at boot by `cloudyhome-nas-render.service` to inject the SMTP endpoint from secrets.
+All three feed into a single alert script (`/usr/local/sbin/nas-health-alert`) that logs to the systemd journal and delivers email notifications via `msmtp`. The alert script config is rendered at boot by `cloudyhome-nas-render.service` to inject the SMTP endpoint and email addresses from secrets.
 
 ### 15.2 ZFS Scrub Schedule
 
@@ -833,7 +846,7 @@ ZED watches the ZFS kernel event stream and fires shell scripts (ZEDLETs) on eve
 | Event class | ZEDLET | Fires when |
 |---|---|---|
 | `scrub_finish` | `scrub_finish-notify.sh` | Scrub completes (includes error counts) |
-| `pool_state` | `statechange-notify.sh` | Pool transitions to DEGRADED, FAULTED, etc. |
+| `statechange` | `statechange-notify.sh` | Pool transitions to DEGRADED, FAULTED, etc. |
 | `io_error` | `io-notify.sh` | Checksum, read, or write errors exceed threshold |
 | `resilver_finish` | `resilver_finish-notify.sh` | Resilver completes after disk replacement |
 
@@ -911,7 +924,7 @@ The `health` schema, validation rules, and secrets are defined in the canonical 
    ALERT_TO=admin@example.com
    ALERT_FROM=nas@example.com
    ```
-   - Permissions: `0644 root:root` (no secrets — addresses only).
+   - Permissions: `0600 root:root` (addresses resolved from secrets via `addresses_ref`).
    - If `health` is absent or `alert.enabled=false`, rendered with `ALERT_ENABLED=false` and no other fields.
 
 2. `/etc/msmtprc` — msmtp configuration file:
@@ -920,7 +933,7 @@ The `health` schema, validation rules, and secrets are defined in the canonical 
    auth           on
    tls            on
    tls_starttls   on
-   logfile        /var/log/msmtp.log
+   syslog         LOG_MAIL
 
    account        default
    host           smtp.example.com

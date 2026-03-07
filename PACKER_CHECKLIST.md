@@ -66,15 +66,15 @@ The cloudyhome boot chain manages ZFS import exclusively via `cloudyhome-zfs-imp
 systemctl mask zfs-import-cache.service zfs-import-scan.service zfs-mount.service zfs-share.service
 ```
 
-## 4. Disable NFS and Samba auto-start
+## 4. Disable NFS, Samba, and iSCSI auto-start
 
-Disable the default auto-start of `nfs-server.service` and `smbd.service` so they do not start before the cloudyhome boot chain has rendered and applied config:
+Disable the default auto-start of `nfs-server.service`, `smbd.service`, and `target.service` so they do not start before the cloudyhome boot chain has rendered and applied config:
 
 ```
-systemctl disable nfs-server smbd
+systemctl disable nfs-server smbd target
 ```
 
-**Note**: The runtime boot chain (`cloudyhome-nas-apply.service`) uses `reload-or-restart` and handles both cases — services already running or stopped. This step is best-effort hygiene only; the system is correct either way.
+**Note**: The runtime boot chain (`cloudyhome-nas-apply.service`) uses `reload-or-restart` (NFS, Samba) and `restart` (iSCSI) and handles both cases — services already running or stopped. This step is best-effort hygiene only; the system is correct either way.
 
 ## 5. Service enabling (handled by deliverables, not Packer)
 
