@@ -145,7 +145,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
    - Loads `/etc/nftables.conf` via `nft -f`.
    - Firewall is active before any NAS service starts.
 6. `cloudyhome-nas-apply.service`:
-   - Creates missing datasets and zvols.
+   - Creates missing datasets and zvols; enforces dataset quotas.
    - Provisions Samba users into `tdbsam` (only if `samba` is configured).
    - Runs `/etc/cloudyhome/nas-apply-services.sh` — a rendered script that starts health monitoring services (always) and NAS services present and enabled in `services.yml`.
 7. `cloudyhome-garage-bootstrap.service`:
@@ -218,7 +218,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Decrypts `/var/lib/cloudyhome/nas/secrets.enc.yaml` to a temp file under `/run` using the AGE key at `/etc/sops/age/keys.txt`. Temp file is removed on exit (guaranteed cleanup regardless of success or failure).
 - Apply sequence:
   1. `systemctl daemon-reload` — required so systemd sees the Quadlet `.container` files rendered by `cloudyhome-nas-render.service`; must run before any Quadlet unit is started. Always runs.
-  2. Create missing datasets and zvols. Each `zfs create` is attempted independently; any failure is fatal — the script logs the error and exits non-zero immediately without proceeding to subsequent steps. Always runs.
+  2. Create missing datasets and zvols, and enforce quotas. Each `zfs create` is attempted independently; any failure is fatal — the script logs the error and exits non-zero immediately without proceeding to subsequent steps. For each dataset, after creation (or if it already exists), the configured quota is enforced: if the configured quota differs from the current value, the script verifies current usage is below the configured quota before applying it; if usage meets or exceeds the configured quota, the script exits non-zero. Always runs.
   3. If `samba` is present in `services.yml`: create missing Samba OS users — for each `smb_`-prefixed key in `samba.users` map in secrets, run `useradd --no-create-home --shell /usr/sbin/nologin <username>` if the account does not already exist. Idempotent.
   4. If `samba` is present in `services.yml`: provision Samba users into `tdbsam` idempotently — for each entry in the `samba.users` map in secrets, check existence with `pdbedit -L -u <username>` (exit 0 = already present); if absent, add via `smbpasswd -a -s <username>` with password piped to stdin; if present, update password via `smbpasswd -s <username>` (no `-a`).
   5. Run `/etc/cloudyhome/nas-apply-services.sh` — the rendered service lifecycle script. Contains systemctl commands for health monitoring (always) and NAS services present and enabled in `services.yml` (see below). Always runs; the script itself is the conditional gate.
@@ -331,7 +331,7 @@ Idempotency (hard requirement):
 - Health alert settings (SMTP host, port, TLS mode)
 
 `secrets.enc.yaml` defines sensitive values:
-- Disk IDs for passthrough verification (`disks/ids`)
+- Disk IDs for passthrough verification (`disks.ids`)
 - NAS VM host IP (`host/ip`)
 - Firewall source IP lists (per service)
 - NFS client CIDRs (per export)
@@ -448,7 +448,7 @@ Recovery drill target:
 
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
-- **Datasets**: `storage.datasets` is a map of simple underscore-separated name to mount path (e.g. `shares_media: "/zpool0/shares/media"`). The apply script derives the ZFS dataset name from the mount path value by stripping the leading `/` (e.g. `zpool0/shares/media`) and passes it to `zfs create -p`. Parent datasets created automatically via `-p`. Existing datasets left untouched.
+- **Datasets**: `storage.datasets` is a map of simple underscore-separated name to an object with `path` (mount path) and `quota` (ZFS quota) fields (e.g. `shares_media: {path: "/zpool0/shares/media", quota: "4T"}`). The ZFS dataset name is `<key>` (e.g. `shares_media`). The apply script creates it via `zfs create -o mountpoint=<path> <key>`. After creation, the quota is set via `zfs set quota=<quota> <dataset>`. For existing datasets, the script reads the current quota with `zfs get -Hp -o value quota <dataset>` and compares it to the configured value: if the current quota differs from the configured value (or is `none`), the script checks current usage via `zfs get -Hp -o value used <dataset>`. If usage is below the configured quota, the quota is set via `zfs set quota=<quota> <dataset>` (works for both increases and decreases). If usage already meets or exceeds the configured quota, the script logs an error and exits non-zero — applying the quota would make the dataset immediately full.
 - **zvols** (iSCSI LUNs): created if missing using `zfs create -V <size> <path>`. Existing zvols left untouched (size is not modified). Path uses dataset name form (e.g. `zpool0/iscsi/vmstore`); block device is derived as `/dev/zvol/<path>`.
 
 ## 14. Finalized `services.yml` Structure
@@ -469,7 +469,7 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 ### 14.2 Top-Level Keys
 - `version` (required, integer): schema version. Initial value: `1`.
 - `host_ip_ref` (required, string): secret path resolving to the NAS VM's LAN IP; used as bind address for all services.
-- `storage` (required, map): pool and dataset conventions.
+- `storage` (required, map): pool, dataset conventions, and per-dataset quotas.
 - `firewall` (required, map): nftables rule definitions.
 - `nfs` (optional, map): NFS export definitions.
 - `samba` (optional, map): Samba global and share definitions.
@@ -489,16 +489,34 @@ host_ip_ref: "host/ip"              # resolves to the NAS VM's LAN IP from secre
 
 storage:
   pool: "zpool0"
-  datasets:                                                          # canonical inventory; created by cloudyhome-nas-apply.service if missing (zfs create -p)
-    system:               "/zpool0/system"                          # NAS system/state parent dataset
-    system_garage:        "/zpool0/system/garage"                   # Garage state parent dataset
-    system_garage_data:   "/zpool0/system/garage/data"              # Garage data directory (bind-mounted into container)
-    system_garage_meta:   "/zpool0/system/garage/meta"              # Garage metadata directory (bind-mounted into container)
-    shares:               "/zpool0/shares"                          # file shares parent dataset
-    shares_media:         "/zpool0/shares/media"                    # shared media (NFS + Samba)
-    shares_scanner_inbox: "/zpool0/shares/scanner-inbox"            # FTP upload root
-    iscsi:                "/zpool0/iscsi"                           # zvol parent dataset for iSCSI LUNs
-    backups:              "/zpool0/backups"                         # backup target dataset (snapshots/replication landing)
+  datasets:                                                          # canonical inventory; created by cloudyhome-nas-apply.service if missing; ZFS dataset name = map key
+    system:                                                          # NAS system/state parent dataset
+      path: "/zpool0/system"
+      quota: "10G"
+    system_garage:                                                   # Garage state parent dataset
+      path: "/zpool0/system/garage"
+      quota: "50G"
+    system_garage_data:                                              # Garage data directory (bind-mounted into container)
+      path: "/zpool0/system/garage/data"
+      quota: "500G"
+    system_garage_meta:                                              # Garage metadata directory (bind-mounted into container)
+      path: "/zpool0/system/garage/meta"
+      quota: "10G"
+    shares:                                                          # file shares parent dataset
+      path: "/zpool0/shares"
+      quota: "5T"
+    shares_media:                                                    # shared media (NFS + Samba)
+      path: "/zpool0/shares/media"
+      quota: "4T"
+    shares_scanner_inbox:                                            # FTP upload root
+      path: "/zpool0/shares/scanner-inbox"
+      quota: "50G"
+    iscsi:                                                           # zvol parent dataset for iSCSI LUNs
+      path: "/zpool0/iscsi"
+      quota: "500G"
+    backups:                                                         # backup target dataset (snapshots/replication landing)
+      path: "/zpool0/backups"
+      quota: "2T"
 
 firewall:
   default_input: "drop"              # drop | accept
@@ -650,11 +668,13 @@ health:
 - A rule may not define both `ports` and `port_range`.
 - **Firewall rules are literal**: the renderer emits nftables rules exactly as declared — no merging, deduplication, or cross-validation against service config ports. It is the operator's responsibility to keep firewall rules consistent with service ports. Port overlaps between rules (same port, same protocol) are not rejected; they produce separate nftables rules as written.
 - `storage.pool` must be `zpool0` for this deployment.
-- `storage.datasets` must be a non-empty map with unique keys and unique values.
+- `storage.datasets` must be a non-empty map with unique keys and unique `path` values.
 - Each key must be a non-empty underscore-separated identifier (simple name, e.g. `shares_media`).
-- Each value must be an absolute mount path starting with `/zpool0/`. The ZFS dataset name is derived by stripping the leading `/`.
+- Each value must be a map with required keys `path` and `quota`.
+- `path` must be an absolute mount path starting with `/zpool0/`. The ZFS dataset name is the map key itself (e.g. `shares_media`), not derived from the path.
+- `quota` must be a valid ZFS size string (integer followed by a unit suffix: `K`, `M`, `G`, or `T`, e.g. `"500G"`, `"2T"`).
 - Any `path` intended for data export must start with `/zpool0/`.
-- **Path-to-dataset cross-validation**: every service data path must match a value in `storage.datasets` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`. For iSCSI zvol paths (`iscsi.targets[*].luns[*].path`), the parent dataset (path with the last component stripped, prefixed with `/`) must match a value in `storage.datasets` (e.g., zvol path `zpool0/iscsi/vmstore` requires `/zpool0/iscsi` in datasets). Unmatched paths fail validation.
+- **Path-to-dataset cross-validation**: every service data path must match a `path` value in `storage.datasets` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`. For iSCSI zvol paths (`iscsi.targets[*].luns[*].path`), the parent dataset key is derived by stripping the pool prefix and last component (e.g., zvol path `zpool0/iscsi/vmstore` → parent key `iscsi`), which must exist as a key in `storage.datasets`. Unmatched paths fail validation.
 - `nfs.version` must be `4`. NFSv3 is not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `nfs.exports` must be a non-empty list when `nfs` is present.
 - `nfs.exports[*].name` must be unique.
@@ -904,7 +924,7 @@ The email configuration and rendered `msmtprc` + `alert.conf` are read by the al
 **Behavior**:
 1. Read `/etc/cloudyhome/health/alert.conf` for alert settings (`ALERT_ENABLED`, `ALERT_TO`, `ALERT_FROM`).
 2. Determine source and severity from caller environment:
-   - **smartd**: `SMARTD_DEVICE`, `SMARTD_FAILTYPE`, `SMARTD_MESSAGE` are set. Severity: `critical` for `SMARTD_FAILTYPE=EMailTest` → `info`; `SMARTD_FAILTYPE=Health` → `critical`; all others → `warning`.
+   - **smartd**: `SMARTD_DEVICE`, `SMARTD_FAILTYPE`, `SMARTD_MESSAGE` are set. Severity mapping: `SMARTD_FAILTYPE=EmailTest` → `info`; `SMARTD_FAILTYPE=Health` → `critical`; all others → `warning`.
    - **ZED**: `ZEVENT_CLASS`, `ZEVENT_POOL`, `ZEVENT_SUBCLASS` are set. Severity: `statechange` to DEGRADED/FAULTED → `critical`; `io_error` → `warning`; `scrub_finish` with errors → `warning`, without errors → `info`; `resilver_finish` → `info`.
 3. Construct message string with hostname, timestamp, source, severity, and event details.
 4. Always log to journal via `logger -t nas-health-alert -p <priority>`.
