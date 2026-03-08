@@ -129,6 +129,18 @@ class TestValidateAll:
         errors = validate_all(config, secrets_raw)
         assert any("Garage data_dir" in e for e in errors)
 
+    def test_garage_metadata_dir_not_in_datasets(self, services_raw, secrets_raw):
+        services_raw["garage"]["metadata_dir"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_all(config, secrets_raw)
+        assert any("Garage metadata_dir" in e for e in errors)
+
+    def test_samba_users_missing_from_secrets(self, services_raw, secrets_raw):
+        del secrets_raw["samba"]
+        config = NasConfig(**services_raw)
+        errors = validate_all(config, secrets_raw)
+        assert any("samba.users not found" in e for e in errors)
+
     def test_garage_missing_secret_ref(self, services_raw, secrets_raw):
         del secrets_raw["garage"]["admin_token"]
         config = NasConfig(**services_raw)

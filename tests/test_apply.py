@@ -186,6 +186,18 @@ class TestCreateZvols:
 
         assert any(c[:3] == ["zfs", "create", "-V"] for c in calls)
 
+    def test_zvol_path_uses_iscsi_dataset(self, services_raw, monkeypatch):
+        from cloudyhome.models import NasConfig
+        config = NasConfig(**services_raw)
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_zvols(config)
+
+        # Full ZFS path must be derived from iscsi.dataset + lun.path, not storage.pool
+        assert any("zpool0/iscsi/vmstore" in arg for cmd in calls for arg in cmd)
+
     def test_skips_existing_zvol(self, services_raw, monkeypatch):
         from cloudyhome.models import NasConfig
         config = NasConfig(**services_raw)

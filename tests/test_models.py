@@ -109,6 +109,10 @@ class TestFirewallConfig:
         with pytest.raises(ValidationError, match="proto must be tcp or udp"):
             FirewallRule(service="x", ports=[2049], proto=["sctp"], sources_ref="y")
 
+    def test_proto_non_empty(self):
+        with pytest.raises(ValidationError, match="proto must be non-empty"):
+            FirewallRule(service="x", ports=[22], proto=[], sources_ref="y")
+
     def test_well_known_ports_allowed(self):
         for port in (22, 445, 21):
             r = FirewallRule(service="x", ports=[port], proto=["tcp"], sources_ref="y")
@@ -224,6 +228,11 @@ class TestIscsiConfig:
         with pytest.raises(ValidationError, match="chap_secret_ref required"):
             IscsiAuth(discovery_auth="none", session_auth="chap", chap_secret_ref="")
 
+    def test_enabled_target_requires_luns(self):
+        with pytest.raises(ValidationError, match="luns must be non-empty when target is enabled"):
+            IscsiTarget(name="t", iqn_suffix="s", enabled=True, luns=[],
+                        auth={"discovery_auth": "none", "session_auth": "none"})
+
     def test_unique_lun_ids(self):
         with pytest.raises(ValidationError, match="LUN IDs must be unique"):
             IscsiTarget(name="t", iqn_suffix="s", auth={"discovery_auth": "none", "session_auth": "none"},
@@ -250,6 +259,24 @@ class TestGarageConfig:
             GarageConfig(
                 runtime="docker", image="img", rpc_port=3901, s3_port=3900, admin_port=3903,
                 s3_region="g", replication_mode="none", config_dir="/etc/g",
+                data_dir="/zpool0/d", metadata_dir="/zpool0/m",
+                layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
+            )
+
+    def test_enabled_requires_quadlet_name(self):
+        with pytest.raises(ValidationError, match="quadlet_name required"):
+            GarageConfig(
+                enabled=True, quadlet_name="", image="img", rpc_port=3901, s3_port=3900,
+                admin_port=3903, s3_region="g", replication_mode="none", config_dir="/etc/g",
+                data_dir="/zpool0/d", metadata_dir="/zpool0/m",
+                layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
+            )
+
+    def test_config_dir_must_be_absolute(self):
+        with pytest.raises(ValidationError, match="config_dir must be absolute"):
+            GarageConfig(
+                image="img", rpc_port=3901, s3_port=3900, admin_port=3903,
+                s3_region="g", replication_mode="none", config_dir="relative/path",
                 data_dir="/zpool0/d", metadata_dir="/zpool0/m",
                 layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
             )
@@ -281,6 +308,14 @@ class TestFtpConfig:
                 users_ref=["ftp/users/u"], upload_root="/zpool0/ftp",
             )
 
+    def test_config_dir_must_be_absolute(self):
+        with pytest.raises(ValidationError, match="config_dir must be absolute"):
+            FtpConfig(
+                image="img", config_dir="relative/path", control_port=21,
+                passive_ports={"min": 21000, "max": 21010},
+                users_ref=["ftp/users/u"], upload_root="/zpool0/ftp",
+            )
+
     def test_passive_ports_min_le_max(self):
         with pytest.raises(ValidationError, match="passive_ports min must be <= max"):
             PassivePorts(min=22000, max=21000)
@@ -290,6 +325,14 @@ class TestHealthConfig:
     def test_enabled_requires_smtp_host(self):
         with pytest.raises(ValidationError, match="smtp_host required"):
             HealthAlert(enabled=True, smtp_auth_ref="x", addresses_ref="y")
+
+    def test_enabled_requires_smtp_auth_ref(self):
+        with pytest.raises(ValidationError, match="smtp_auth_ref required"):
+            HealthAlert(enabled=True, smtp_host="smtp.example.com", smtp_auth_ref="", addresses_ref="x")
+
+    def test_enabled_requires_addresses_ref(self):
+        with pytest.raises(ValidationError, match="addresses_ref required"):
+            HealthAlert(enabled=True, smtp_host="smtp.example.com", smtp_auth_ref="x", addresses_ref="")
 
     def test_smtp_tls_values(self):
         for valid in ("starttls", "tls", "off"):
