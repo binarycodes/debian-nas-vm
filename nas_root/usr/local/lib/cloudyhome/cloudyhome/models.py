@@ -371,7 +371,7 @@ class IscsiTarget(BaseModel):
     @model_validator(mode="after")
     def unique_lun_ids(self):
         if self.luns:
-            ids = [l.lun for l in self.luns]
+            ids = [lun.lun for lun in self.luns]
             if len(ids) != len(set(ids)):
                 raise ValueError("LUN IDs must be unique per target")
         return self
@@ -417,8 +417,8 @@ class IscsiConfig(BaseModel):
     def unique_lun_paths(self):
         paths = []
         for t in self.targets:
-            for l in t.luns:
-                paths.append(l.path)
+            for lun in t.luns:
+                paths.append(lun.path)
         if len(paths) != len(set(paths)):
             raise ValueError("LUN paths must be unique across all targets")
         return self

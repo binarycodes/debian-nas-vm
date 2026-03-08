@@ -62,7 +62,7 @@ def main():
                 status = api_request(f"{base_url}/v1/status", admin_token)
                 log.info("Garage is ready (attempt %d/%d)", attempt, GARAGE_MAX_ATTEMPTS)
                 break
-            except (urllib.error.URLError, ConnectionError, OSError) as e:
+            except (urllib.error.URLError, ConnectionError, OSError):
                 if attempt == GARAGE_MAX_ATTEMPTS:
                     log.error("Garage did not become ready after %d attempts", GARAGE_MAX_ATTEMPTS)
                     sys.exit(1)

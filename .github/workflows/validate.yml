@@ -1,4 +1,4 @@
-name: Tests
+name: Validate
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - '**'
 
 jobs:
-  test:
+  validate:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -15,5 +15,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run tests
-        run: make test
+      - name: Lint and test
+        run: make validate

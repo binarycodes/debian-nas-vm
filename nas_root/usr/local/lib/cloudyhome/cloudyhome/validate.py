@@ -109,7 +109,7 @@ def validate_all(config, secrets):
             if share.enabled:
                 for ref_path in share.users_ref:
                     try:
-                        resolved = resolve_ref(secrets, ref_path)
+                        resolve_ref(secrets, ref_path)
                         # Extract username from ref path
                         username = ref_path.split("/")[-1]
                         if not username.startswith("smb_"):
