@@ -28,8 +28,9 @@ packages:
 		python3-pip
 
 # Pre-pull container images so Quadlet services can start at boot without network access.
-# Image names are read from services.yml (.garage.image, .ftp.image) so the Makefile
-# never needs updating when versions change.
+# Image names are read from services.yml (.garage.image, .ftp.image).
+# Pin to a specific version tag in services.yml for reproducible builds; the placeholder
+# uses :latest as a convenience but production deployments should pin (e.g. dxflrs/garage:v1.0.2).
 pull-images:
 	for image in $$(yq -r '[.garage.image, .ftp.image] | .[] | select(. != null)' $(SERVICES)); do \
 		podman pull "$$image"; \

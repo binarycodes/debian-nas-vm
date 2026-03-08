@@ -11,7 +11,8 @@ SCRIPTS := \
     ../nas_root/usr/local/sbin/nas-apply-config \
     ../nas_root/usr/local/sbin/nas-garage-bootstrap \
     ../nas_root/usr/local/sbin/nas-render-config \
-    ../nas_root/usr/local/sbin/nas-validate-config
+    ../nas_root/usr/local/sbin/nas-validate-config \
+    ../nas_root/usr/local/sbin/nas-validate-install-phase
 BASH_SCRIPTS := \
     ../nas_root/usr/local/sbin/nas-health-alert \
     ../nas_root/usr/local/sbin/nas-zedlet-wrapper \

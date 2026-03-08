@@ -11,6 +11,7 @@ class TestSourceTreeCompleteness:
 
     EXPECTED_SCRIPTS = [
         "usr/local/sbin/nas-validate-config",
+        "usr/local/sbin/nas-validate-install-phase",
         "usr/local/sbin/nas-render-config",
         "usr/local/sbin/nas-apply-config",
         "usr/local/sbin/nas-zfs-import",
