@@ -8,7 +8,8 @@ $(VENV):
 	python3 -m venv $(VENV)
 
 deps: $(VENV)
-	$(PIP) install -q pydantic pyyaml jinja2 tomli-w pytest
+	$(PIP) install -q pytest
+	$(PIP) install -q -e ../nas_root/usr/local/lib/cloudyhome
 
 test: deps
 	$(PYTHON) -m pytest . -v

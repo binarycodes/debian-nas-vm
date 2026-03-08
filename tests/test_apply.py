@@ -1,11 +1,8 @@
 """Tests for nas-apply-config logic (parse_size_bytes and structural tests)."""
 import os
-import sys
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "lib", "cloudyhome"))
 
 # Import from the apply script (no .py extension, so we use SourceFileLoader directly)
 APPLY_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "sbin", "nas-apply-config")

@@ -1,14 +1,10 @@
 """Shared fixtures for MVP1 tests."""
 import copy
 import os
-import sys
 import tempfile
 
 import pytest
 import yaml
-
-# Make cloudyhome importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "lib", "cloudyhome"))
 
 SERVICES_PATH = os.path.join(os.path.dirname(__file__), "..", "nas_root", "var", "lib", "cloudyhome", "nas", "services.yml")
 SECRETS_EXAMPLE_PATH = os.path.join(os.path.dirname(__file__), "..", "nas_root", "var", "lib", "cloudyhome", "nas", "secrets.enc.yaml")

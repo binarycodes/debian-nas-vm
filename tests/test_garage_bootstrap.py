@@ -1,14 +1,11 @@
 """Tests for nas-garage-bootstrap logic."""
 import json
 import os
-import sys
 import urllib.request
 import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "lib", "cloudyhome"))
 
 BOOTSTRAP_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "sbin", "nas-garage-bootstrap")
 

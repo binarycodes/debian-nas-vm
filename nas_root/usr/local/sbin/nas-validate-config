@@ -3,8 +3,6 @@
 import logging
 import sys
 
-sys.path.insert(0, "/usr/local/lib/cloudyhome")
-
 import yaml
 from cloudyhome.models import NasConfig
 from cloudyhome.secrets import secrets_context

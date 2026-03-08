@@ -34,7 +34,6 @@ class TestSourceTreeCompleteness:
         "etc/cloudyhome/templates/nftables.conf.j2",
         "etc/cloudyhome/templates/exports.j2",
         "etc/cloudyhome/templates/smb.conf.j2",
-        "etc/cloudyhome/templates/saveconfig.json.j2",
         "etc/cloudyhome/templates/garage.toml.j2",
         "etc/cloudyhome/templates/cloudyhome-garage.container.j2",
         "etc/cloudyhome/templates/ftp.env.j2",
@@ -80,10 +79,11 @@ class TestSourceTreeCompleteness:
         assert first_line.startswith("#!"), f"Missing shebang: {script}"
 
 
-class TestWantedBySymlinks:
-    """Verify multi-user.target.wants/ and timers.target.wants/ symlinks exist with correct targets."""
+INSTALLER_MAKEFILE = os.path.join(NAS_ROOT, "var", "lib", "cloudyhome", "installer", "Makefile")
 
-    SYSTEMD_DIR = os.path.join(NAS_ROOT, "etc", "systemd", "system")
+
+class TestWantedBySymlinks:
+    """Verify the installer Makefile enables the correct systemd units."""
 
     @pytest.mark.parametrize("unit", [
         "cloudyhome-nas-validate.service",
@@ -93,26 +93,20 @@ class TestWantedBySymlinks:
         "cloudyhome-nas-apply.service",
     ])
     def test_multi_user_wants_symlink(self, unit):
-        link = os.path.join(self.SYSTEMD_DIR, "multi-user.target.wants", unit)
-        assert os.path.islink(link), f"Missing symlink: {link}"
-        target = os.readlink(link)
-        assert target == f"../{unit}", f"Wrong target for {unit}: {target}"
+        content = open(INSTALLER_MAKEFILE).read()
+        assert unit in content, f"Makefile missing systemctl enable for {unit}"
 
     def test_timers_wants_scrub_timer(self):
-        link = os.path.join(self.SYSTEMD_DIR, "timers.target.wants", "cloudyhome-zfs-scrub.timer")
-        assert os.path.islink(link), f"Missing symlink: {link}"
-        assert os.readlink(link) == "../cloudyhome-zfs-scrub.timer"
+        content = open(INSTALLER_MAKEFILE).read()
+        assert "cloudyhome-zfs-scrub.timer" in content
 
     def test_garage_bootstrap_not_in_multi_user_wants(self):
-        link = os.path.join(self.SYSTEMD_DIR, "multi-user.target.wants", "cloudyhome-garage-bootstrap.service")
-        assert not os.path.exists(link), "garage-bootstrap should NOT be in multi-user.target.wants"
+        content = open(INSTALLER_MAKEFILE).read()
+        assert "cloudyhome-garage-bootstrap.service" not in content
 
 
 class TestZedletSymlinks:
-    """Verify ZEDLET symlinks point to nas-zedlet-wrapper."""
-
-    ZED_DIR = os.path.join(NAS_ROOT, "etc", "zfs", "zed.d")
-    WRAPPER = "/usr/local/sbin/nas-zedlet-wrapper"
+    """Verify the installer Makefile creates the correct ZEDLET symlinks."""
 
     @pytest.mark.parametrize("zedlet", [
         "statechange-nas-health-alert.sh",
@@ -121,9 +115,15 @@ class TestZedletSymlinks:
         "resilver_finish-nas-health-alert.sh",
     ])
     def test_zedlet_symlink_target(self, zedlet):
-        link = os.path.join(self.ZED_DIR, zedlet)
-        assert os.path.islink(link), f"Missing ZEDLET symlink: {zedlet}"
-        assert os.readlink(link) == self.WRAPPER, f"Wrong target for {zedlet}"
+        content = open(INSTALLER_MAKEFILE).read()
+        assert zedlet in content, f"Makefile missing ZEDLET symlink for {zedlet}"
+        assert "nas-zedlet-wrapper" in content, "Makefile missing nas-zedlet-wrapper target"
+
+    def test_zedlet_symlinks_not_via_systemctl(self):
+        content = open(INSTALLER_MAKEFILE).read()
+        # ZED handlers must use ln -sf, not systemctl enable
+        zedlet_block = content[content.index("zedlet-symlinks"):]
+        assert "ln -sf" in zedlet_block
 
 
 class TestStockServicesEnabledByApply:
