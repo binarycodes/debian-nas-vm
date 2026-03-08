@@ -4,6 +4,7 @@ VENV    := .venv
 PYTHON  := $(VENV)/bin/python
 PIP     := $(VENV)/bin/pip
 RUFF    := $(VENV)/bin/ruff
+BANDIT  := $(VENV)/bin/bandit
 
 PACKAGE := ../nas_root/usr/local/lib/cloudyhome
 SCRIPTS := \
@@ -20,11 +21,12 @@ $(VENV):
 	python3 -m venv $(VENV)
 
 deps: $(VENV)
-	$(PIP) install -q pytest ruff
+	$(PIP) install -q pytest ruff bandit
 	$(PIP) install -q -e $(PACKAGE)
 
 lint: deps
 	$(RUFF) check $(PACKAGE) $(SCRIPTS)
+	$(BANDIT) -q -c bandit.yaml -r $(PACKAGE) $(SCRIPTS)
 	shellcheck $(BASH_SCRIPTS)
 
 test: deps
