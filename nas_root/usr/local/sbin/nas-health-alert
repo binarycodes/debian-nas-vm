@@ -10,6 +10,7 @@ ALERT_ENABLED=false
 ALERT_TO=""
 ALERT_FROM=""
 if [ -f "$ALERT_CONF" ]; then
+    # shellcheck source=/dev/null
     . "$ALERT_CONF"
 fi
 
