@@ -80,6 +80,52 @@ class TestSourceTreeCompleteness:
         assert first_line.startswith("#!"), f"Missing shebang: {script}"
 
 
+class TestWantedBySymlinks:
+    """Verify multi-user.target.wants/ and timers.target.wants/ symlinks exist with correct targets."""
+
+    SYSTEMD_DIR = os.path.join(NAS_ROOT, "etc", "systemd", "system")
+
+    @pytest.mark.parametrize("unit", [
+        "cloudyhome-nas-validate.service",
+        "cloudyhome-zfs-import.service",
+        "cloudyhome-nas-render.service",
+        "cloudyhome-nas-firewall.service",
+        "cloudyhome-nas-apply.service",
+    ])
+    def test_multi_user_wants_symlink(self, unit):
+        link = os.path.join(self.SYSTEMD_DIR, "multi-user.target.wants", unit)
+        assert os.path.islink(link), f"Missing symlink: {link}"
+        target = os.readlink(link)
+        assert target == f"../{unit}", f"Wrong target for {unit}: {target}"
+
+    def test_timers_wants_scrub_timer(self):
+        link = os.path.join(self.SYSTEMD_DIR, "timers.target.wants", "cloudyhome-zfs-scrub.timer")
+        assert os.path.islink(link), f"Missing symlink: {link}"
+        assert os.readlink(link) == "../cloudyhome-zfs-scrub.timer"
+
+    def test_garage_bootstrap_not_in_multi_user_wants(self):
+        link = os.path.join(self.SYSTEMD_DIR, "multi-user.target.wants", "cloudyhome-garage-bootstrap.service")
+        assert not os.path.exists(link), "garage-bootstrap should NOT be in multi-user.target.wants"
+
+
+class TestZedletSymlinks:
+    """Verify ZEDLET symlinks point to nas-zedlet-wrapper."""
+
+    ZED_DIR = os.path.join(NAS_ROOT, "etc", "zfs", "zed.d")
+    WRAPPER = "/usr/local/sbin/nas-zedlet-wrapper"
+
+    @pytest.mark.parametrize("zedlet", [
+        "statechange-nas-health-alert.sh",
+        "scrub_finish-nas-health-alert.sh",
+        "io-nas-health-alert.sh",
+        "resilver_finish-nas-health-alert.sh",
+    ])
+    def test_zedlet_symlink_target(self, zedlet):
+        link = os.path.join(self.ZED_DIR, zedlet)
+        assert os.path.islink(link), f"Missing ZEDLET symlink: {zedlet}"
+        assert os.readlink(link) == self.WRAPPER, f"Wrong target for {zedlet}"
+
+
 class TestStockServicesEnabledByApply:
     """Stock services (smartd, zfs-zed) are enabled at runtime by nas-apply-config, not Packer."""
 

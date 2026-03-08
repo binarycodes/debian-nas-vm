@@ -277,3 +277,169 @@ class TestAtomicWrite:
         run_dir = str(tmp_path / "run")
         atomic_write("hello\n", dest, run_dir=run_dir)
         assert open(dest).read() == "hello\n"
+
+
+class TestBuildContextOptional:
+    def test_absent_sections_produce_no_context_keys(self, services_raw, secrets_raw):
+        for key in ("nfs", "samba", "iscsi", "garage", "ftp"):
+            del services_raw[key]
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        assert "nfs_cidrs" not in ctx
+        assert "samba_usernames" not in ctx
+        assert "iscsi_chap" not in ctx
+        assert "garage_rpc_secret" not in ctx
+        assert "ftp_users_env" not in ctx
+
+
+class TestBuildSaveconfigEdgeCases:
+    def test_no_chap_sets_authentication_zero(self, services_raw, secrets_raw):
+        services_raw["iscsi"]["targets"][0]["auth"]["session_auth"] = "none"
+        services_raw["iscsi"]["targets"][0]["auth"]["chap_secret_ref"] = ""
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        result = build_saveconfig(config, ctx)
+        attrs = result["targets"][0]["tpgs"][0]["attributes"]
+        assert attrs["authentication"] == 0
+
+    def test_no_initiators_denies_all(self, services_raw, secrets_raw):
+        services_raw["iscsi"]["targets"][0]["initiators"] = []
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        result = build_saveconfig(config, ctx)
+        tpg = result["targets"][0]["tpgs"][0]
+        assert tpg["attributes"]["generate_node_acls"] == 0
+        assert tpg["node_acls"] == []
+
+
+class TestExportsTemplateVariants:
+    def test_disabled_export_excluded(self, services_raw, secrets_raw, template_dir):
+        services_raw["nfs"]["exports"][0]["enabled"] = False
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("exports.j2", ctx, template_dir)
+        assert "/zpool0/shares/media" not in content
+
+    def test_no_root_squash_identity_map(self, services_raw, secrets_raw, template_dir):
+        services_raw["nfs"]["exports"][0]["clients"][0]["identity_map"] = {"mode": "no_root_squash"}
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("exports.j2", ctx, template_dir)
+        assert "no_root_squash" in content
+
+    def test_all_squash_identity_map(self, services_raw, secrets_raw, template_dir):
+        services_raw["nfs"]["exports"][0]["clients"][0]["identity_map"] = {
+            "mode": "all_squash",
+            "anon_uid": 65534,
+            "anon_gid": 65534,
+        }
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("exports.j2", ctx, template_dir)
+        assert "all_squash" in content
+        assert "anonuid=65534" in content
+        assert "anongid=65534" in content
+
+
+class TestSmbConfTemplateVariants:
+    def test_disabled_share_excluded(self, services_raw, secrets_raw, template_dir):
+        services_raw["samba"]["shares"][0]["enabled"] = False
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("smb.conf.j2", ctx, template_dir)
+        assert "[media]" not in content
+
+    def test_read_only_share(self, services_raw, secrets_raw, template_dir):
+        services_raw["samba"]["shares"][0]["read_only"] = True
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("smb.conf.j2", ctx, template_dir)
+        assert "read only = yes" in content
+
+    def test_guest_ok_share(self, services_raw, secrets_raw, template_dir):
+        services_raw["samba"]["shares"][0]["guest_ok"] = True
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("smb.conf.j2", ctx, template_dir)
+        assert "guest ok = yes" in content
+
+    def test_write_list_rendered(self, services_raw, secrets_raw, template_dir):
+        services_raw["samba"]["shares"][0]["write_list"] = ["smb_alice"]
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("smb.conf.j2", ctx, template_dir)
+        assert "write list = smb_alice" in content
+
+    def test_force_user_rendered(self, services_raw, secrets_raw, template_dir):
+        services_raw["samba"]["shares"][0]["force_user"] = "media"
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("smb.conf.j2", ctx, template_dir)
+        assert "force user = media" in content
+
+    def test_force_group_rendered(self, services_raw, secrets_raw, template_dir):
+        services_raw["samba"]["shares"][0]["force_group"] = "media"
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("smb.conf.j2", ctx, template_dir)
+        assert "force group = media" in content
+
+
+class TestMsmtprcTemplateVariants:
+    def test_tls_mode(self, services_raw, secrets_raw, template_dir):
+        services_raw["health"]["alert"]["smtp_tls"] = "tls"
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("msmtprc.j2", ctx, template_dir)
+        assert "tls            on" in content
+        assert "tls_starttls   off" in content
+
+    def test_tls_off_mode(self, services_raw, secrets_raw, template_dir):
+        services_raw["health"]["alert"]["smtp_tls"] = "off"
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("msmtprc.j2", ctx, template_dir)
+        assert "tls            off" in content
+
+
+class TestNftablesTemplateVariants:
+    def test_bare_ip_source_expands_to_cidr(self, full_context, template_dir):
+        ctx, config = full_context
+        content = render_template("nftables.conf.j2", ctx, template_dir)
+        # FTP source is 192.168.1.50 (bare IP), must be expanded to /32
+        assert "192.168.1.50/32" in content
+
+
+class TestApplyServicesDisabledVariants:
+    def test_garage_disabled_excluded(self, services_raw, secrets_raw, template_dir):
+        services_raw["garage"]["enabled"] = False
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("nas-apply-services.sh.j2", ctx, template_dir)
+        assert "cloudyhome-garage" not in content
+
+    def test_ftp_disabled_excluded(self, services_raw, secrets_raw, template_dir):
+        services_raw["ftp"]["enabled"] = False
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("nas-apply-services.sh.j2", ctx, template_dir)
+        assert "cloudyhome-ftp" not in content
+
+
+class TestExportsTemplateFallback:
+    def test_export_level_options_used_when_client_options_empty(self, services_raw, secrets_raw, template_dir):
+        # Set client options to empty so export-level options are used as fallback
+        services_raw["nfs"]["exports"][0]["clients"][0]["options"] = []
+        services_raw["nfs"]["exports"][0]["options"] = ["ro", "async"]
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("exports.j2", ctx, template_dir)
+        assert "ro" in content
+        assert "async" in content
+
+
+class TestRenderStructure:
+    def test_uses_flock(self):
+        content = open(RENDER_SCRIPT).read()
+        assert "fcntl.flock" in content
+        assert "LOCK_EX" in content

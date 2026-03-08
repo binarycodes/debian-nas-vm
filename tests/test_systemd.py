@@ -119,6 +119,16 @@ class TestServiceProperties:
         assert "multi-user.target" in u["Install"]["WantedBy"]
 
 
+class TestGarageBootstrapUnit:
+    def test_no_wanted_by(self):
+        u = load_unit("cloudyhome-garage-bootstrap.service")
+        assert not u.has_section("Install") or "WantedBy" not in u["Install"]
+
+    def test_wants_garage_service(self):
+        u = load_unit("cloudyhome-garage-bootstrap.service")
+        assert "cloudyhome-garage.service" in u["Unit"]["Wants"]
+
+
 class TestTimerUnit:
     def test_scrub_timer_calendar(self):
         u = load_unit("cloudyhome-zfs-scrub.timer")

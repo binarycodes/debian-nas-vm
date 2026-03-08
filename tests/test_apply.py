@@ -1,6 +1,7 @@
 """Tests for nas-apply-config logic (parse_size_bytes and structural tests)."""
 import os
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -76,3 +77,186 @@ class TestApplyStructure:
         enable_pos = main_body.index("smartd.service")
         dataset_pos = main_body.index("create_datasets")
         assert enable_pos < dataset_pos
+
+
+# ---------------------------------------------------------------------------
+# Functional logic tests (with mocked subprocess)
+# ---------------------------------------------------------------------------
+
+_MINIMAL_RAW = {
+    "version": 1,
+    "host_ip_ref": "host/ip",
+    "storage": {
+        "pool": "zpool0",
+        "datasets": {"data": {"path": "/zpool0/data", "quota": "10G"}},
+    },
+    "firewall": {
+        "default_input": "drop",
+        "rules": [{"service": "ssh", "ports": [22], "proto": ["tcp"], "sources_ref": "fw/ssh"}],
+    },
+}
+
+
+class TestParseSizeBytesExtra:
+    def test_bare_integer(self):
+        assert apply_mod.parse_size_bytes("1048576") == 1048576
+
+
+class TestCreateDatasets:
+    @pytest.fixture
+    def config(self):
+        from cloudyhome.models import NasConfig
+        return NasConfig(**_MINIMAL_RAW)
+
+    def test_creates_missing_dataset(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        assert any(c[:2] == ["zfs", "create"] for c in calls)
+
+    def test_skips_create_when_dataset_exists(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        assert not any(c[:2] == ["zfs", "create"] for c in calls)
+
+    def test_sets_quota_when_unset(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: "0")
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        assert any("quota=10G" in arg for cmd in calls for arg in cmd)
+
+    def test_skips_quota_when_already_correct(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        assert not any("quota" in arg for cmd in calls for arg in cmd)
+
+    def test_raises_when_lowering_quota_below_usage(self, config, monkeypatch):
+        current_quota = 20 * 1024**3
+        used = 15 * 1024**3
+
+        def mock_zfs_get(prop, name):
+            return str(current_quota) if prop == "quota" else str(used)
+
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "zfs_get", mock_zfs_get)
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: None)
+
+        with pytest.raises(RuntimeError, match="Cannot lower quota"):
+            apply_mod.create_datasets(config)
+
+
+class TestCreateZvols:
+    def test_creates_missing_zvol(self, services_raw, monkeypatch):
+        from cloudyhome.models import NasConfig
+        config = NasConfig(**services_raw)
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_zvols(config)
+
+        assert any(c[:3] == ["zfs", "create", "-V"] for c in calls)
+
+    def test_skips_existing_zvol(self, services_raw, monkeypatch):
+        from cloudyhome.models import NasConfig
+        config = NasConfig(**services_raw)
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_zvols(config)
+
+        assert not any(c[:2] == ["zfs", "create"] for c in calls)
+
+    def test_noop_when_no_iscsi(self, monkeypatch):
+        from cloudyhome.models import NasConfig
+        config = NasConfig(**_MINIMAL_RAW)
+        calls = []
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_zvols(config)
+
+        assert calls == []
+
+
+class TestProvisionSambaUsers:
+    @pytest.fixture
+    def samba_config(self, services_raw):
+        from cloudyhome.models import NasConfig
+        return NasConfig(**services_raw)
+
+    @pytest.fixture
+    def samba_secrets(self):
+        return {"samba": {"users": {"smb_alice": {"password": "secret"}}}}
+
+    def _make_run_cmd(self, calls, user_exists, samba_user_exists):
+        def run_cmd(cmd, input_data=None, check=True):
+            calls.append(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            if cmd[0] == "id":
+                result.returncode = 0 if user_exists else 1
+            elif cmd[0] == "pdbedit":
+                result.returncode = 0 if samba_user_exists else 1
+            return result
+        return run_cmd
+
+    def test_creates_new_os_user_when_absent(self, samba_config, samba_secrets, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "run_cmd", self._make_run_cmd(calls, user_exists=False, samba_user_exists=False))
+
+        apply_mod.provision_samba_users(samba_config, samba_secrets)
+
+        assert any(c[0] == "useradd" for c in calls)
+
+    def test_skips_useradd_when_user_exists(self, samba_config, samba_secrets, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "run_cmd", self._make_run_cmd(calls, user_exists=True, samba_user_exists=True))
+
+        apply_mod.provision_samba_users(samba_config, samba_secrets)
+
+        assert not any(c[0] == "useradd" for c in calls)
+
+    def test_adds_new_samba_user_with_smbpasswd_a(self, samba_config, samba_secrets, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "run_cmd", self._make_run_cmd(calls, user_exists=True, samba_user_exists=False))
+
+        apply_mod.provision_samba_users(samba_config, samba_secrets)
+
+        assert any(c == ["smbpasswd", "-a", "-s", "smb_alice"] for c in calls)
+
+    def test_updates_existing_samba_user(self, samba_config, samba_secrets, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "run_cmd", self._make_run_cmd(calls, user_exists=True, samba_user_exists=True))
+
+        apply_mod.provision_samba_users(samba_config, samba_secrets)
+
+        assert any(c == ["smbpasswd", "-s", "smb_alice"] for c in calls)
+
+    def test_noop_when_no_samba(self, monkeypatch):
+        from cloudyhome.models import NasConfig
+        config = NasConfig(**_MINIMAL_RAW)
+        calls = []
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.provision_samba_users(config, {})
+
+        assert calls == []

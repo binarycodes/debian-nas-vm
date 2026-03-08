@@ -72,6 +72,33 @@ class TestZfsImportScript:
         content = open(path).read()
         assert "trap cleanup EXIT" in content
 
+    def test_zfs_mount_all(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "zfs mount -a" in content
+
+    def test_zpool_list_check_before_import(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "zpool list" in content
+        list_pos = content.index("zpool list")
+        import_pos = content.index("zpool import")
+        assert list_pos < import_pos
+
+    def test_zpool_import_command(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "zpool import" in content
+
+    def test_failed_import_exits_1(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "Failed to import pool" in content
+        failed_pos = content.index("Failed to import pool")
+        # exit 1 must appear after the failed import message
+        exit_pos = content.index("exit 1", failed_pos)
+        assert exit_pos > failed_pos
+
 
 class TestHealthAlertScript:
     def test_set_euo_pipefail(self):

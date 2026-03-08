@@ -143,7 +143,7 @@ def build_saveconfig(config, ctx):
             "enable": True,
             "attributes": {
                 "authentication": 1 if target.auth.session_auth == "chap" else 0,
-                "generate_node_acls": 0 if target.initiators else 1,
+                "generate_node_acls": 0,
             },
             "portals": [{"ip_address": host_ip, "port": portal_port}],
             "luns": tpg_luns,

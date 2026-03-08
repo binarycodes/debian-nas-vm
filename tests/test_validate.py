@@ -69,6 +69,18 @@ class TestValidateAll:
         errors = validate_all(config, secrets_raw)
         assert any("disks.ids must be a non-empty list" in e for e in errors)
 
+    def test_disk_ids_with_invalid_entries(self, services_raw, secrets_raw):
+        secrets_raw["disks"]["ids"] = ["valid-disk-id", None]
+        config = NasConfig(**services_raw)
+        errors = validate_all(config, secrets_raw)
+        assert any("disks.ids must contain only non-empty strings" in e for e in errors)
+
+    def test_disk_ids_with_empty_string_entry(self, services_raw, secrets_raw):
+        secrets_raw["disks"]["ids"] = ["valid-disk-id", ""]
+        config = NasConfig(**services_raw)
+        errors = validate_all(config, secrets_raw)
+        assert any("disks.ids must contain only non-empty strings" in e for e in errors)
+
     def test_non_rfc1918_firewall_source(self, services_raw, secrets_raw):
         secrets_raw["firewall"]["ssh"] = ["8.8.8.8"]
         config = NasConfig(**services_raw)

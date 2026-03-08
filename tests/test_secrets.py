@@ -1,6 +1,8 @@
 """Tests for secrets resolution (secrets.py)."""
+import io
 import pytest
-from cloudyhome.secrets import resolve_ref
+from cloudyhome.secrets import resolve_ref, check_run_tmpfs
+from unittest.mock import mock_open, patch
 
 
 class TestResolveRef:
@@ -66,3 +68,16 @@ class TestResolveRef:
         # Health
         resolve_ref(secrets_raw, services_raw["health"]["alert"]["smtp_auth_ref"])
         resolve_ref(secrets_raw, services_raw["health"]["alert"]["addresses_ref"])
+
+
+class TestCheckRunTmpfs:
+    def test_passes_when_run_is_tmpfs(self):
+        mounts_content = "tmpfs /run tmpfs rw,nosuid,nodev,noexec,relatime,size=102400k 0 0\n"
+        with patch("cloudyhome.secrets.open", mock_open(read_data=mounts_content)):
+            assert check_run_tmpfs() is True
+
+    def test_raises_when_run_not_tmpfs(self):
+        mounts_content = "ext4 /run ext4 rw 0 0\n"
+        with patch("cloudyhome.secrets.open", mock_open(read_data=mounts_content)):
+            with pytest.raises(RuntimeError, match="not mounted as tmpfs"):
+                check_run_tmpfs()
