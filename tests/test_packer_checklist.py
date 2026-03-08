@@ -51,7 +51,7 @@ class TestSourceTreeCompleteness:
 
     EXPECTED_DATA = [
         "var/lib/cloudyhome/nas/services.yml",
-        "var/lib/cloudyhome/nas/secrets.example.yaml",
+        "var/lib/cloudyhome/nas/secrets.enc.yaml",
     ]
 
     EXPECTED_LIB = [

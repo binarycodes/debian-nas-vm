@@ -276,7 +276,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - The timer is enabled by the source tree's `WantedBy` symlink (`timers.target.wants/cloudyhome-zfs-scrub.timer`). Scrub frequency is a static image-time decision, not driven by `services.yml`.
 
 ### 6.9 `smartd.service` (stock, configured)
-- Stock `smartmontools` service, enabled by the deliverables post-install script.
+- Stock `smartmontools` service, enabled at runtime by `nas-apply-config` during the apply phase.
 - Started by the rendered `nas-apply-services.sh` script (`systemctl reload-or-restart smartd.service`) — unconditionally, on every boot.
 - Configured via static `/etc/smartd.conf` baked into the image (not rendered at boot).
 - Runs scheduled SMART self-tests: short daily at 02:00, long Saturdays at 03:00.
@@ -286,7 +286,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Full config breakdown in Section 15.3.
 
 ### 6.10 `zfs-zed.service` (stock, configured)
-- Stock ZFS Event Daemon service, enabled by the deliverables post-install script.
+- Stock ZFS Event Daemon service, enabled at runtime by `nas-apply-config` during the apply phase.
 - Started by the rendered `nas-apply-services.sh` script (`systemctl reload-or-restart zfs-zed.service`) — unconditionally, on every boot.
 - Configured via static `/etc/zfs/zed.d/zed.rc` baked into the image (not rendered at boot).
 - Watches the ZFS kernel event stream and fires ZEDLETs on pool state changes, scrub results, I/O errors, and resilver completions.

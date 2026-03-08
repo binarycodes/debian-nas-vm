@@ -61,12 +61,12 @@ def build_context(config, secrets):
                 ctx["iscsi_chap"][target.name] = resolve_ref(secrets, target.auth.chap_secret_ref)
 
     # Garage secrets
-    if config.garage and config.garage.enabled:
+    if config.garage:
         ctx["garage_rpc_secret"] = resolve_ref(secrets, config.garage.rpc_secret_ref)
         ctx["garage_admin_token"] = resolve_ref(secrets, config.garage.admin_token_ref)
 
     # FTP users
-    if config.ftp and config.ftp.enabled:
+    if config.ftp:
         ftp_user_entries = []
         for ref_path in config.ftp.users_ref:
             username = ref_path.split("/")[-1]

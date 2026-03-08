@@ -11,7 +11,7 @@ import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "lib", "cloudyhome"))
 
 SERVICES_PATH = os.path.join(os.path.dirname(__file__), "..", "nas_root", "var", "lib", "cloudyhome", "nas", "services.yml")
-SECRETS_EXAMPLE_PATH = os.path.join(os.path.dirname(__file__), "..", "nas_root", "var", "lib", "cloudyhome", "nas", "secrets.example.yaml")
+SECRETS_EXAMPLE_PATH = os.path.join(os.path.dirname(__file__), "..", "nas_root", "var", "lib", "cloudyhome", "nas", "secrets.enc.yaml")
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "..", "nas_root", "etc", "cloudyhome", "templates")
 
 

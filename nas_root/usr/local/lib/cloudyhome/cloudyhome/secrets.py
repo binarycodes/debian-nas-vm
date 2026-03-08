@@ -1,11 +1,9 @@
 """Secret decryption and resolution utilities."""
-import json
 import logging
 import os
 import subprocess
 import tempfile
 from contextlib import contextmanager
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 

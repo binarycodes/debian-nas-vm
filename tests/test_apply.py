@@ -159,7 +159,21 @@ class TestCreateDatasets:
         monkeypatch.setattr(apply_mod, "zfs_get", mock_zfs_get)
         monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: None)
 
-        with pytest.raises(RuntimeError, match="Cannot lower quota"):
+        with pytest.raises(RuntimeError, match="Cannot set quota"):
+            apply_mod.create_datasets(config)
+
+    def test_raises_when_setting_quota_from_none_and_usage_exceeds_target(self, config, monkeypatch):
+        # current quota is none/0, but dataset already uses more than the target
+        used = 15 * 1024**3
+
+        def mock_zfs_get(prop, name):
+            return "0" if prop == "quota" else str(used)
+
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "zfs_get", mock_zfs_get)
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: None)
+
+        with pytest.raises(RuntimeError, match="Cannot set quota"):
             apply_mod.create_datasets(config)
 
 

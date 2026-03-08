@@ -69,13 +69,13 @@ def create_datasets(config):
             current_bytes = int(current_quota_raw)
 
         if current_bytes != target_bytes:
-            # Check usage before lowering quota
-            if current_bytes > 0 and target_bytes < current_bytes:
+            # Check usage before applying any non-zero quota
+            if target_bytes > 0:
                 used_raw = zfs_get("used", full_name)
                 used_bytes = int(used_raw)
                 if used_bytes >= target_bytes:
                     raise RuntimeError(
-                        f"Cannot lower quota on {full_name}: "
+                        f"Cannot set quota on {full_name}: "
                         f"usage {used_bytes} >= target quota {target_bytes}"
                     )
             log.info("Setting quota %s on %s", target_quota, full_name)
