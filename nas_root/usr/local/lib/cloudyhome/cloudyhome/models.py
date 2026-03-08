@@ -1,7 +1,27 @@
 """Pydantic v2 models for NAS configuration."""
 import re
-from typing import ClassVar, Optional
+from typing import Optional
 from pydantic import BaseModel, field_validator, model_validator, ConfigDict
+from cloudyhome.constants import (
+    CONFIG_VERSION,
+    CONTAINER_RUNTIME,
+    FIREWALL_VALID_DEFAULT_INPUT,
+    FIREWALL_VALID_PROTOS,
+    FIREWALL_WELL_KNOWN_PORTS,
+    FTP_CONTROL_PORT,
+    GARAGE_REPLICATION_MODES,
+    ISCSI_VALID_AUTH_MODES,
+    NFS_VERSION,
+    NFS_VALID_IDENTITY_MODES,
+    PORT_MAX,
+    PORT_MIN,
+    SAMBA_MIN_PROTOCOL,
+    SMTP_DEFAULT_PORT,
+    SMTP_PORT_MIN,
+    SMTP_VALID_TLS_MODES,
+    ZPOOL_NAME,
+    ZPOOL_PATH_PREFIX,
+)
 
 
 class StorageDataset(BaseModel):
@@ -11,8 +31,8 @@ class StorageDataset(BaseModel):
     @field_validator("path")
     @classmethod
     def path_must_be_absolute_zpool(cls, v):
-        if not v.startswith("/zpool0/"):
-            raise ValueError("path must start with /zpool0/")
+        if not v.startswith(ZPOOL_PATH_PREFIX):
+            raise ValueError(f"path must start with {ZPOOL_PATH_PREFIX}")
         return v
 
     @field_validator("quota")
@@ -30,8 +50,8 @@ class StorageConfig(BaseModel):
     @field_validator("pool")
     @classmethod
     def pool_must_be_zpool0(cls, v):
-        if v != "zpool0":
-            raise ValueError("pool must be zpool0")
+        if v != ZPOOL_NAME:
+            raise ValueError(f"pool must be {ZPOOL_NAME}")
         return v
 
     @field_validator("datasets")
@@ -69,21 +89,19 @@ class FirewallRule(BaseModel):
         if not v:
             raise ValueError("proto must be non-empty")
         for p in v:
-            if p not in ("tcp", "udp"):
+            if p not in FIREWALL_VALID_PROTOS:
                 raise ValueError(f"proto must be tcp or udp, got {p}")
         return v
-
-    WELL_KNOWN_PORTS: ClassVar[set[int]] = {22, 445, 21}
 
     @field_validator("ports")
     @classmethod
     def ports_must_be_valid(cls, v):
         if v is not None:
             for p in v:
-                if p in cls.WELL_KNOWN_PORTS:
+                if p in FIREWALL_WELL_KNOWN_PORTS:
                     continue
-                if not (1001 <= p <= 65535):
-                    raise ValueError(f"port {p} must be 1001-65535 or a well-known port (22, 445, 21)")
+                if not (PORT_MIN <= p <= PORT_MAX):
+                    raise ValueError(f"port {p} must be {PORT_MIN}-{PORT_MAX} or a well-known port (22, 445, 21)")
         return v
 
     @field_validator("port_range")
@@ -92,8 +110,8 @@ class FirewallRule(BaseModel):
         if v is not None:
             if len(v) != 2:
                 raise ValueError("port_range must be [min, max]")
-            if not (1001 <= v[0] <= 65535 and 1001 <= v[1] <= 65535):
-                raise ValueError("port_range values must be 1001-65535")
+            if not (PORT_MIN <= v[0] <= PORT_MAX and PORT_MIN <= v[1] <= PORT_MAX):
+                raise ValueError(f"port_range values must be {PORT_MIN}-{PORT_MAX}")
             if v[0] > v[1]:
                 raise ValueError("port_range min must be <= max")
         return v
@@ -121,7 +139,7 @@ class FirewallConfig(BaseModel):
     @field_validator("default_input")
     @classmethod
     def default_input_must_be_valid(cls, v):
-        if v not in ("drop", "accept"):
+        if v not in FIREWALL_VALID_DEFAULT_INPUT:
             raise ValueError("default_input must be drop or accept")
         return v
 
@@ -148,7 +166,7 @@ class IdentityMap(BaseModel):
     @field_validator("mode")
     @classmethod
     def mode_must_be_valid(cls, v):
-        if v not in ("root_squash", "no_root_squash", "all_squash"):
+        if v not in NFS_VALID_IDENTITY_MODES:
             raise ValueError("mode must be root_squash, no_root_squash, or all_squash")
         return v
 
@@ -205,8 +223,8 @@ class NfsConfig(BaseModel):
     @field_validator("version")
     @classmethod
     def version_must_be_4(cls, v):
-        if v != 4:
-            raise ValueError("NFS version must be 4")
+        if v != NFS_VERSION:
+            raise ValueError(f"NFS version must be {NFS_VERSION}")
         return v
 
     @field_validator("exports")
@@ -235,8 +253,8 @@ class SambaGlobal(BaseModel):
     @field_validator("min_protocol")
     @classmethod
     def min_protocol_must_be_smb3(cls, v):
-        if v != "SMB3_11":
-            raise ValueError("min_protocol must be SMB3_11")
+        if v != SAMBA_MIN_PROTOCOL:
+            raise ValueError(f"min_protocol must be {SAMBA_MIN_PROTOCOL}")
         return v
 
 
@@ -318,14 +336,14 @@ class IscsiAuth(BaseModel):
     @field_validator("discovery_auth")
     @classmethod
     def discovery_auth_valid(cls, v):
-        if v not in ("none", "chap"):
+        if v not in ISCSI_VALID_AUTH_MODES:
             raise ValueError("discovery_auth must be none or chap")
         return v
 
     @field_validator("session_auth")
     @classmethod
     def session_auth_valid(cls, v):
-        if v not in ("none", "chap"):
+        if v not in ISCSI_VALID_AUTH_MODES:
             raise ValueError("session_auth must be none or chap")
         return v
 
@@ -374,8 +392,8 @@ class IscsiConfig(BaseModel):
     @field_validator("portal_port")
     @classmethod
     def portal_port_valid(cls, v):
-        if not (1001 <= v <= 65535):
-            raise ValueError("portal_port must be 1001-65535")
+        if not (PORT_MIN <= v <= PORT_MAX):
+            raise ValueError(f"portal_port must be {PORT_MIN}-{PORT_MAX}")
         return v
 
     @field_validator("targets")
@@ -419,7 +437,7 @@ class PassivePorts(BaseModel):
 
 class GarageConfig(BaseModel):
     enabled: bool = True
-    runtime: str = "podman-quadlet-root"
+    runtime: str = CONTAINER_RUNTIME
     quadlet_name: str = "cloudyhome-garage"
     image: str
     rpc_port: int
@@ -437,29 +455,29 @@ class GarageConfig(BaseModel):
     @field_validator("runtime")
     @classmethod
     def runtime_valid(cls, v):
-        if v != "podman-quadlet-root":
-            raise ValueError("runtime must be podman-quadlet-root")
+        if v != CONTAINER_RUNTIME:
+            raise ValueError(f"runtime must be {CONTAINER_RUNTIME}")
         return v
 
     @field_validator("replication_mode")
     @classmethod
     def replication_mode_valid(cls, v):
-        if v not in ("none", "1", "2", "3"):
+        if v not in GARAGE_REPLICATION_MODES:
             raise ValueError("replication_mode must be one of: none, 1, 2, 3")
         return v
 
     @field_validator("data_dir")
     @classmethod
     def data_dir_under_zpool(cls, v):
-        if not v.startswith("/zpool0/"):
-            raise ValueError("data_dir must start with /zpool0/")
+        if not v.startswith(ZPOOL_PATH_PREFIX):
+            raise ValueError(f"data_dir must start with {ZPOOL_PATH_PREFIX}")
         return v
 
     @field_validator("metadata_dir")
     @classmethod
     def metadata_dir_under_zpool(cls, v):
-        if not v.startswith("/zpool0/"):
-            raise ValueError("metadata_dir must start with /zpool0/")
+        if not v.startswith(ZPOOL_PATH_PREFIX):
+            raise ValueError(f"metadata_dir must start with {ZPOOL_PATH_PREFIX}")
         return v
 
     @model_validator(mode="after")
@@ -473,14 +491,14 @@ class GarageConfig(BaseModel):
                 raise ValueError("config_dir must be absolute path")
             for port_field in ("rpc_port", "s3_port", "admin_port"):
                 p = getattr(self, port_field)
-                if not (1001 <= p <= 65535):
-                    raise ValueError(f"{port_field} must be 1001-65535")
+                if not (PORT_MIN <= p <= PORT_MAX):
+                    raise ValueError(f"{port_field} must be {PORT_MIN}-{PORT_MAX}")
         return self
 
 
 class FtpConfig(BaseModel):
     enabled: bool = True
-    runtime: str = "podman-quadlet-root"
+    runtime: str = CONTAINER_RUNTIME
     quadlet_name: str = "cloudyhome-ftp"
     image: str
     config_dir: str
@@ -492,22 +510,22 @@ class FtpConfig(BaseModel):
     @field_validator("runtime")
     @classmethod
     def runtime_valid(cls, v):
-        if v != "podman-quadlet-root":
-            raise ValueError("runtime must be podman-quadlet-root")
+        if v != CONTAINER_RUNTIME:
+            raise ValueError(f"runtime must be {CONTAINER_RUNTIME}")
         return v
 
     @field_validator("control_port")
     @classmethod
     def control_port_must_be_21(cls, v):
-        if v != 21:
-            raise ValueError("control_port must be 21")
+        if v != FTP_CONTROL_PORT:
+            raise ValueError(f"control_port must be {FTP_CONTROL_PORT}")
         return v
 
     @field_validator("upload_root")
     @classmethod
     def upload_root_under_zpool(cls, v):
-        if not v.startswith("/zpool0/"):
-            raise ValueError("upload_root must start with /zpool0/")
+        if not v.startswith(ZPOOL_PATH_PREFIX):
+            raise ValueError(f"upload_root must start with {ZPOOL_PATH_PREFIX}")
         return v
 
     @model_validator(mode="after")
@@ -526,7 +544,7 @@ class FtpConfig(BaseModel):
 class HealthAlert(BaseModel):
     enabled: bool = False
     smtp_host: str = ""
-    smtp_port: int = 587
+    smtp_port: int = SMTP_DEFAULT_PORT
     smtp_tls: str = "starttls"
     smtp_auth_ref: str = ""
     addresses_ref: str = ""
@@ -534,7 +552,7 @@ class HealthAlert(BaseModel):
     @field_validator("smtp_tls")
     @classmethod
     def smtp_tls_valid(cls, v):
-        if v not in ("starttls", "tls", "off"):
+        if v not in SMTP_VALID_TLS_MODES:
             raise ValueError("smtp_tls must be starttls, tls, or off")
         return v
 
@@ -543,8 +561,8 @@ class HealthAlert(BaseModel):
         if self.enabled:
             if not self.smtp_host:
                 raise ValueError("smtp_host required when alert is enabled")
-            if not (1 <= self.smtp_port <= 65535):
-                raise ValueError("smtp_port must be 1-65535")
+            if not (SMTP_PORT_MIN <= self.smtp_port <= PORT_MAX):
+                raise ValueError(f"smtp_port must be {SMTP_PORT_MIN}-{PORT_MAX}")
             if not self.smtp_auth_ref:
                 raise ValueError("smtp_auth_ref required when alert is enabled")
             if not self.addresses_ref:
@@ -573,8 +591,8 @@ class NasConfig(BaseModel):
     @field_validator("version")
     @classmethod
     def version_must_be_1(cls, v):
-        if v != 1:
-            raise ValueError("version must be 1")
+        if v != CONFIG_VERSION:
+            raise ValueError(f"version must be {CONFIG_VERSION}")
         return v
 
     @field_validator("host_ip_ref")

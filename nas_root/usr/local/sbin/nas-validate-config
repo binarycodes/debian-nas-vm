@@ -4,11 +4,10 @@ import logging
 import sys
 
 import yaml
+from cloudyhome.constants import SERVICES_PATH
 from cloudyhome.models import NasConfig
 from cloudyhome.secrets import secrets_context
 from cloudyhome.validate import validate_all
-
-SERVICES_PATH = "/var/lib/cloudyhome/nas/services.yml"
 
 logging.basicConfig(format="%(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)

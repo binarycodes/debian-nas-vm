@@ -60,7 +60,7 @@ class TestApplyStructure:
 
     def test_apply_services_script_called(self):
         content = open(APPLY_SCRIPT).read()
-        assert "/etc/cloudyhome/nas-apply-services.sh" in content
+        assert "APPLY_SERVICES_SCRIPT" in content
 
     def test_enables_stock_services(self):
         content = open(APPLY_SCRIPT).read()

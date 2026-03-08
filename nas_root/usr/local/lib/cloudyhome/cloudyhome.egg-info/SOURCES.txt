@@ -1,5 +1,6 @@
 pyproject.toml
 cloudyhome/__init__.py
+cloudyhome/constants.py
 cloudyhome/models.py
 cloudyhome/render.py
 cloudyhome/secrets.py

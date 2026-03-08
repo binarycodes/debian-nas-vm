@@ -8,9 +8,9 @@ import tempfile
 
 import jinja2
 
-log = logging.getLogger(__name__)
+from cloudyhome.constants import RUN_DIR, TEMPLATE_DIR
 
-TEMPLATE_DIR = "/etc/cloudyhome/templates"
+log = logging.getLogger(__name__)
 
 
 def get_jinja_env(template_dir=TEMPLATE_DIR):
@@ -49,7 +49,7 @@ def validate_samba(path):
         raise RuntimeError(f"Samba validation failed: {result.stderr}")
 
 
-def atomic_write(content, dest, mode=0o644, owner="root:root", validator=None, run_dir="/run/nas"):
+def atomic_write(content, dest, mode=0o644, owner="root:root", validator=None, run_dir=RUN_DIR):
     """Write content to dest atomically via temp file, with optional validation.
 
     Returns True if the file was updated, False if unchanged.

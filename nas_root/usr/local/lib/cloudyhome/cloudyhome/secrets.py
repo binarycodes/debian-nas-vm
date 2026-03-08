@@ -5,10 +5,9 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 
-log = logging.getLogger(__name__)
+from cloudyhome.constants import RUN_DIR, SECRETS_PATH
 
-SECRETS_PATH = "/var/lib/cloudyhome/nas/secrets.enc.yaml"
-RUN_DIR = "/run/nas"
+log = logging.getLogger(__name__)
 
 
 def check_run_tmpfs():
