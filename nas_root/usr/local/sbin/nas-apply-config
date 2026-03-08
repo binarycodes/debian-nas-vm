@@ -81,10 +81,9 @@ def create_zvols(config):
     """Create missing iSCSI zvols."""
     if not config.iscsi:
         return
-    pool = config.storage.pool
     for target in config.iscsi.targets:
         for lun in target.luns:
-            full_path = f"{pool}/{lun.path}"
+            full_path = f"{config.iscsi.dataset.lstrip('/')}/{lun.path}"
             if not dataset_exists(full_path):
                 log.info("Creating zvol %s with size %s", full_path, lun.size)
                 run_cmd(["zfs", "create", "-V", lun.size, full_path])

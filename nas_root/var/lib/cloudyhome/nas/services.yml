@@ -100,13 +100,14 @@ samba:
 iscsi:
   base_iqn: "iqn.2026-03.home.arpa:nas01"
   portal_port: 3260
+  dataset: "/zpool0/iscsi"
   targets:
     - name: "vmstore"
       iqn_suffix: "vmstore"
       luns:
         - lun: 0
           type: "zvol"
-          path: "iscsi/vmstore"
+          path: "vmstore"
           size: "100G"
           readonly: false
       auth:

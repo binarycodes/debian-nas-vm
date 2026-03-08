@@ -19,21 +19,12 @@ from cloudyhome.constants import (
     SMTP_DEFAULT_PORT,
     SMTP_PORT_MIN,
     SMTP_VALID_TLS_MODES,
-    ZPOOL_NAME,
-    ZPOOL_PATH_PREFIX,
 )
 
 
 class StorageDataset(BaseModel):
     path: str
     quota: str
-
-    @field_validator("path")
-    @classmethod
-    def path_must_be_absolute_zpool(cls, v):
-        if not v.startswith(ZPOOL_PATH_PREFIX):
-            raise ValueError(f"path must start with {ZPOOL_PATH_PREFIX}")
-        return v
 
     @field_validator("quota")
     @classmethod
@@ -47,13 +38,6 @@ class StorageConfig(BaseModel):
     pool: str
     datasets: dict[str, StorageDataset]
 
-    @field_validator("pool")
-    @classmethod
-    def pool_must_be_zpool0(cls, v):
-        if v != ZPOOL_NAME:
-            raise ValueError(f"pool must be {ZPOOL_NAME}")
-        return v
-
     @field_validator("datasets")
     @classmethod
     def datasets_non_empty(cls, v):
@@ -66,6 +50,14 @@ class StorageConfig(BaseModel):
         paths = [d.path for d in self.datasets.values()]
         if len(paths) != len(set(paths)):
             raise ValueError("dataset paths must be unique")
+        return self
+
+    @model_validator(mode="after")
+    def paths_match_pool(self):
+        prefix = f"/{self.pool}/"
+        for key, dataset in self.datasets.items():
+            if not dataset.path.startswith(prefix):
+                raise ValueError(f"dataset '{key}' path must start with {prefix}")
         return self
 
     @model_validator(mode="after")
@@ -380,6 +372,7 @@ class IscsiTarget(BaseModel):
 class IscsiConfig(BaseModel):
     base_iqn: str
     portal_port: int
+    dataset: str
     targets: list[IscsiTarget]
 
     @field_validator("base_iqn")
@@ -466,20 +459,6 @@ class GarageConfig(BaseModel):
             raise ValueError("replication_mode must be one of: none, 1, 2, 3")
         return v
 
-    @field_validator("data_dir")
-    @classmethod
-    def data_dir_under_zpool(cls, v):
-        if not v.startswith(ZPOOL_PATH_PREFIX):
-            raise ValueError(f"data_dir must start with {ZPOOL_PATH_PREFIX}")
-        return v
-
-    @field_validator("metadata_dir")
-    @classmethod
-    def metadata_dir_under_zpool(cls, v):
-        if not v.startswith(ZPOOL_PATH_PREFIX):
-            raise ValueError(f"metadata_dir must start with {ZPOOL_PATH_PREFIX}")
-        return v
-
     @model_validator(mode="after")
     def enabled_requires_fields(self):
         if self.enabled:
@@ -519,13 +498,6 @@ class FtpConfig(BaseModel):
     def control_port_must_be_21(cls, v):
         if v != FTP_CONTROL_PORT:
             raise ValueError(f"control_port must be {FTP_CONTROL_PORT}")
-        return v
-
-    @field_validator("upload_root")
-    @classmethod
-    def upload_root_under_zpool(cls, v):
-        if not v.startswith(ZPOOL_PATH_PREFIX):
-            raise ValueError(f"upload_root must start with {ZPOOL_PATH_PREFIX}")
         return v
 
     @model_validator(mode="after")

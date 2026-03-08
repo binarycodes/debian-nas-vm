@@ -111,11 +111,11 @@ class TestValidateAll:
         errors = validate_all(config, secrets_raw)
         assert any("smb_" in e for e in errors)
 
-    def test_iscsi_lun_parent_not_in_datasets(self, services_raw, secrets_raw):
-        services_raw["iscsi"]["targets"][0]["luns"][0]["path"] = "nonexistent/lun"
+    def test_iscsi_dataset_not_in_datasets(self, services_raw, secrets_raw):
+        services_raw["iscsi"]["dataset"] = "/zpool0/nonexistent"
         config = NasConfig(**services_raw)
         errors = validate_all(config, secrets_raw)
-        assert any("iSCSI LUN parent dataset key" in e for e in errors)
+        assert any("iSCSI dataset" in e and "not in storage.datasets" in e for e in errors)
 
     def test_iscsi_chap_missing_fields(self, services_raw, secrets_raw):
         secrets_raw["iscsi"]["vmstore"] = {"chap_user": "", "chap_password": ""}

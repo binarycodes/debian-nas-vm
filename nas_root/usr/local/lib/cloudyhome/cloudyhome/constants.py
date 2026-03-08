@@ -1,9 +1,5 @@
 """Central registry of all well-known paths and tuning constants for the cloudyhome NAS."""
 
-# --- Storage / pool ---
-ZPOOL_NAME        = "zpool0"
-ZPOOL_PATH_PREFIX = "/zpool0/"
-
 # --- Port ranges ---
 PORT_MIN      = 1001   # minimum for user-defined ports (below this requires well-known exception)
 PORT_MAX      = 65535

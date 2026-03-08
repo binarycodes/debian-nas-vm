@@ -81,7 +81,6 @@ def validate_all(config, secrets):
 
     # Path-to-dataset cross-validation
     dataset_paths = set(d.path for d in config.storage.datasets.values())
-    dataset_keys = set(config.storage.datasets.keys())
 
     if config.nfs:
         for export in config.nfs.exports:
@@ -129,14 +128,9 @@ def validate_all(config, secrets):
             errors.append("samba.users not found in secrets")
 
     if config.iscsi:
+        if config.iscsi.dataset not in dataset_paths:
+            errors.append(f"iSCSI dataset '{config.iscsi.dataset}' not in storage.datasets")
         for target in config.iscsi.targets:
-            for lun in target.luns:
-                # Parent dataset key = path minus last component
-                parts = lun.path.split("/")
-                if len(parts) >= 1:
-                    parent_key = parts[0]
-                    if parent_key not in dataset_keys:
-                        errors.append(f"iSCSI LUN parent dataset key '{parent_key}' not in storage.datasets")
             if target.auth.session_auth == "chap":
                 try:
                     chap = resolve_ref(secrets, target.auth.chap_secret_ref)

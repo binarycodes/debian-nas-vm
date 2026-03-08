@@ -41,17 +41,17 @@ class TestNasConfigTopLevel:
 
 
 class TestStorageConfig:
-    def test_pool_must_be_zpool0(self):
-        with pytest.raises(ValidationError, match="pool must be zpool0"):
-            StorageConfig(pool="tank", datasets={"x": {"path": "/zpool0/x", "quota": "1G"}})
+    def test_pool_can_be_any_name(self):
+        config = StorageConfig(pool="tank", datasets={"x": {"path": "/tank/x", "quota": "1G"}})
+        assert config.pool == "tank"
 
     def test_datasets_non_empty(self):
         with pytest.raises(ValidationError, match="datasets must be non-empty"):
             StorageConfig(pool="zpool0", datasets={})
 
-    def test_path_must_start_with_zpool0(self):
+    def test_path_must_match_pool(self):
         with pytest.raises(ValidationError, match="path must start with /zpool0/"):
-            StorageDataset(path="/tank/data", quota="1G")
+            StorageConfig(pool="zpool0", datasets={"x": {"path": "/tank/data", "quota": "1G"}})
 
     def test_quota_format(self):
         for valid in ("10G", "500M", "2T", "1024K"):
@@ -202,7 +202,7 @@ class TestSambaConfig:
 class TestIscsiConfig:
     def test_base_iqn_format(self):
         with pytest.raises(ValidationError, match="base_iqn must be in IQN format"):
-            IscsiConfig(base_iqn="bad", portal_port=3260, targets=[{
+            IscsiConfig(base_iqn="bad", portal_port=3260, dataset="/zpool0/iscsi", targets=[{
                 "name": "t", "iqn_suffix": "s",
                 "luns": [{"lun": 0, "type": "zvol", "path": "x", "size": "1G"}],
                 "auth": {"discovery_auth": "none", "session_auth": "none"},
@@ -210,7 +210,7 @@ class TestIscsiConfig:
 
     def test_portal_port_range(self):
         with pytest.raises(ValidationError, match="portal_port must be 1001-65535"):
-            IscsiConfig(base_iqn="iqn.2026-03.home.arpa:nas", portal_port=80, targets=[{
+            IscsiConfig(base_iqn="iqn.2026-03.home.arpa:nas", portal_port=80, dataset="/zpool0/iscsi", targets=[{
                 "name": "t", "iqn_suffix": "s",
                 "luns": [{"lun": 0, "type": "zvol", "path": "x", "size": "1G"}],
                 "auth": {"discovery_auth": "none", "session_auth": "none"},
@@ -235,13 +235,13 @@ class TestIscsiConfig:
     def test_unique_lun_paths_across_targets(self):
         target_base = {
             "iqn_suffix": "s1",
-            "luns": [{"lun": 0, "type": "zvol", "path": "same/lun", "size": "1G"}],
+            "luns": [{"lun": 0, "type": "zvol", "path": "same", "size": "1G"}],
             "auth": {"discovery_auth": "none", "session_auth": "none"},
         }
         t1 = {**target_base, "name": "t1", "iqn_suffix": "s1"}
         t2 = {**target_base, "name": "t2", "iqn_suffix": "s2"}
         with pytest.raises(ValidationError, match="LUN paths must be unique across all targets"):
-            IscsiConfig(base_iqn="iqn.2026-03.home.arpa:nas", portal_port=3260, targets=[t1, t2])
+            IscsiConfig(base_iqn="iqn.2026-03.home.arpa:nas", portal_port=3260, dataset="/zpool0/iscsi", targets=[t1, t2])
 
 
 class TestGarageConfig:
@@ -251,15 +251,6 @@ class TestGarageConfig:
                 runtime="docker", image="img", rpc_port=3901, s3_port=3900, admin_port=3903,
                 s3_region="g", replication_mode="none", config_dir="/etc/g",
                 data_dir="/zpool0/d", metadata_dir="/zpool0/m",
-                layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
-            )
-
-    def test_data_dir_must_be_under_zpool(self):
-        with pytest.raises(ValidationError, match="data_dir must start with /zpool0/"):
-            GarageConfig(
-                image="img", rpc_port=3901, s3_port=3900, admin_port=3903,
-                s3_region="g", replication_mode="none", config_dir="/etc/g",
-                data_dir="/bad/path", metadata_dir="/zpool0/m",
                 layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
             )
 
@@ -288,14 +279,6 @@ class TestFtpConfig:
                 image="img", config_dir="/etc/f", control_port=2121,
                 passive_ports={"min": 21000, "max": 21010},
                 users_ref=["ftp/users/u"], upload_root="/zpool0/ftp",
-            )
-
-    def test_upload_root_under_zpool(self):
-        with pytest.raises(ValidationError, match="upload_root must start with /zpool0/"):
-            FtpConfig(
-                image="img", config_dir="/etc/f", control_port=21,
-                passive_ports={"min": 21000, "max": 21010},
-                users_ref=["ftp/users/u"], upload_root="/bad/path",
             )
 
     def test_passive_ports_min_le_max(self):

@@ -450,7 +450,7 @@ Recovery drill target:
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
 - **Datasets**: `storage.datasets` is a map of simple underscore-separated name to an object with `path` (mount path) and `quota` (ZFS quota) fields (e.g. `shares_media: {path: "/zpool0/shares/media", quota: "4T"}`). The ZFS dataset name in the config is the map key (e.g. `shares_media`). The apply script constructs the full ZFS name as `{storage.pool}/{key}` (e.g. `zpool0/shares_media`) and creates it via `zfs create -o mountpoint=<path> {pool}/{key}`. After creation, the quota is set via `zfs set quota=<quota> {pool}/{key}`. For existing datasets, the script reads the current quota with `zfs get -Hp -o value quota {pool}/{key}` and compares it to the configured value: if the current quota differs from the configured value (or is `none`), the script checks current usage via `zfs get -Hp -o value used {pool}/{key}`. If usage is below the configured quota, the quota is set via `zfs set quota=<quota> {pool}/{key}` (works for both increases and decreases). If usage already meets or exceeds the configured quota, the script logs an error and exits non-zero — applying the quota would make the dataset immediately full.
-- **zvols** (iSCSI LUNs): created if missing. The config path omits the pool prefix (e.g. `iscsi/vmstore`); the apply script prepends `storage.pool` to get the full ZFS name (`zpool0/iscsi/vmstore`) and runs `zfs create -V <size> {pool}/{path}`. Block device is derived as `/dev/zvol/{pool}/{path}`. Existing zvols left untouched (size is not modified).
+- **zvols** (iSCSI LUNs): created if missing. `iscsi.dataset` holds the absolute dataset path (e.g. `/zpool0/iscsi`); `lun.path` holds only the zvol name (e.g. `vmstore`). The apply script strips the leading `/` from `iscsi.dataset` and concatenates to get the full ZFS name (e.g. `zpool0/iscsi/vmstore`) and runs `zfs create -V <size> {dataset}/{path}`. Block device is derived as `/dev/zvol/{dataset.lstrip('/')}/{path}`. Existing zvols left untouched (size is not modified).
 
 ## 14. Finalized `services.yml` Structure
 
@@ -588,13 +588,14 @@ samba:
 iscsi:
   base_iqn: "iqn.2026-03.home.arpa:nas01"
   portal_port: 3260                    # bind IP resolved from host_ip_ref; single portal, single NIC — multipath not required for this deployment
+  dataset: "/zpool0/iscsi"             # absolute path of the parent ZFS dataset; must exist in storage.datasets
   targets:
     - name: "vmstore"
       iqn_suffix: "vmstore"
       luns:
         - lun: 0
           type: "zvol"
-          path: "iscsi/vmstore"           # zvol path (no pool prefix); apply script prepends storage.pool; block device: /dev/zvol/{pool}/{path}
+          path: "vmstore"                # zvol name only (no dataset prefix); apply script combines with iscsi.dataset; block device: /dev/zvol/{dataset.lstrip('/')}/{path}
           size: "100G"                   # zvol size; created if not present, left untouched if exists
           readonly: false
       auth:
@@ -668,14 +669,14 @@ health:
 - `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy). Bare IPv4 addresses without a prefix length (e.g. `"192.168.1.50"`) are accepted and treated as `/32`; the renderer must emit them with an explicit `/32` suffix in the nftables rule.
 - A rule may not define both `ports` and `port_range`.
 - **Firewall rules are literal**: the renderer emits nftables rules exactly as declared — no merging, deduplication, or cross-validation against service config ports. It is the operator's responsibility to keep firewall rules consistent with service ports. Port overlaps between rules (same port, same protocol) are not rejected; they produce separate nftables rules as written.
-- `storage.pool` must be `zpool0` for this deployment.
+- `storage.pool` is a required non-empty string. All `storage.datasets[*].path` values must start with `/{pool}/` — the model validates this consistency. The pool name drives ZFS dataset and zvol construction throughout the apply and render scripts.
 - `storage.datasets` must be a non-empty map with unique keys and unique `path` values.
 - Each key must be a non-empty underscore-separated identifier (simple name, e.g. `shares_media`).
 - Each value must be a map with required keys `path` and `quota`.
 - `path` must be an absolute mount path starting with `/zpool0/`. The ZFS dataset name is the map key (e.g. `shares_media`); the apply script constructs the full ZFS name as `{storage.pool}/{key}` for ZFS commands.
 - `quota` must be a valid ZFS size string (integer followed by a unit suffix: `K`, `M`, `G`, or `T`, e.g. `"500G"`, `"2T"`).
 - Any `path` intended for data export must start with `/zpool0/`.
-- **Path-to-dataset cross-validation**: every service data path must match a `path` value in `storage.datasets` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`. For iSCSI zvol paths (`iscsi.targets[*].luns[*].path`), the parent dataset key is derived by stripping the last component (e.g., zvol path `iscsi/vmstore` → parent key `iscsi`), which must exist as a key in `storage.datasets`. Unmatched paths fail validation.
+- **Path-to-dataset cross-validation**: every service data path must match a `path` value in `storage.datasets` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`, `iscsi.dataset`. Unmatched paths fail validation.
 - `nfs.version` must be `4`. NFSv3 is not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `nfs.exports` must be a non-empty list when `nfs` is present.
 - `nfs.exports[*].name` must be unique.
@@ -715,7 +716,8 @@ health:
 - If `session_auth=chap`, `chap_secret_ref` is required and must resolve to a map with two non-empty string fields: `chap_user` and `chap_password`.
 - `iscsi.targets[*].luns[*].type` must be `"zvol"`. No other LUN types are supported in this deployment.
 - `iscsi.targets[*].luns[*].size` is required for `type=zvol` and must be a valid ZFS size string (e.g. `"100G"`).
-- `iscsi.targets[*].luns[*].path` omits the pool prefix (e.g. `iscsi/vmstore`); the apply script prepends `storage.pool` for both `zfs create -V` and `/dev/zvol/` derivation (block device: `/dev/zvol/{pool}/{path}`).
+- `iscsi.dataset` is required when `iscsi` is present; must be an absolute path (e.g. `/zpool0/iscsi`) and must match a path in `storage.datasets`. Cross-validated in `validate_all`.
+- `iscsi.targets[*].luns[*].path` is the zvol name only (e.g. `vmstore`); the apply script combines `iscsi.dataset.lstrip('/')` with `lun.path` for both `zfs create -V` and `/dev/zvol/` derivation (block device: `/dev/zvol/{dataset.lstrip('/')}/{path}`).
 - `garage.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`

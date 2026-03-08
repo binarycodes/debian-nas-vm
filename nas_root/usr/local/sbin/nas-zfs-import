@@ -4,8 +4,9 @@ set -euo pipefail
 export SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
 
 SECRETS_ENC="/var/lib/cloudyhome/nas/secrets.enc.yaml"
+SERVICES_YML="/var/lib/cloudyhome/nas/services.yml"
 RUN_DIR="/run/nas"
-POOL="zpool0"
+POOL=$(yq -r '.storage.pool' "$SERVICES_YML")
 
 cleanup() {
     if [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ]; then

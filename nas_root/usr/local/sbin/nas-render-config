@@ -90,7 +90,6 @@ def build_context(config, secrets):
 
 def build_saveconfig(config, ctx):
     """Build iSCSI saveconfig.json as a Python dict."""
-    pool = config.storage.pool
     host_ip = ctx["host_ip"]
     portal_port = config.iscsi.portal_port
 
@@ -108,7 +107,7 @@ def build_saveconfig(config, ctx):
         tpg_luns = []
         for lun in target.luns:
             backstorename = f"{target.name}_{lun.lun}"
-            dev_path = f"/dev/zvol/{pool}/{lun.path}"
+            dev_path = f"/dev/zvol/{config.iscsi.dataset.lstrip('/')}/{lun.path}"
             storage_objects.append({
                 "plugin": "block",
                 "name": backstorename,
