@@ -40,9 +40,42 @@ def validate_email_domain(email, allowed_domains, context=""):
     return None
 
 
+def validate_static(config):
+    """Run static cross-field validation rules (no secrets required). Returns list of error strings."""
+    errors = []
+
+    dataset_paths = set(d.path for d in config.storage.datasets.values())
+
+    if config.nfs:
+        for export in config.nfs.exports:
+            if export.path not in dataset_paths:
+                errors.append(f"NFS export path '{export.path}' not in storage.datasets")
+
+    if config.samba:
+        for share in config.samba.shares:
+            if share.path not in dataset_paths:
+                errors.append(f"Samba share path '{share.path}' not in storage.datasets")
+
+    if config.iscsi:
+        if config.iscsi.dataset not in dataset_paths:
+            errors.append(f"iSCSI dataset '{config.iscsi.dataset}' not in storage.datasets")
+
+    if config.garage:
+        if config.garage.data_dir not in dataset_paths:
+            errors.append(f"Garage data_dir '{config.garage.data_dir}' not in storage.datasets")
+        if config.garage.metadata_dir not in dataset_paths:
+            errors.append(f"Garage metadata_dir '{config.garage.metadata_dir}' not in storage.datasets")
+
+    if config.ftp:
+        if config.ftp.upload_root not in dataset_paths:
+            errors.append(f"FTP upload_root '{config.ftp.upload_root}' not in storage.datasets")
+
+    return errors
+
+
 def validate_all(config, secrets):
     """Run all cross-field validation rules. Returns list of error strings."""
-    errors = []
+    errors = validate_static(config)
 
     # Validate host IP
     try:
@@ -79,13 +112,9 @@ def validate_all(config, secrets):
         except KeyError as e:
             errors.append(f"Firewall rule '{rule.service}': {e}")
 
-    # Path-to-dataset cross-validation
-    dataset_paths = set(d.path for d in config.storage.datasets.values())
-
+    # NFS secrets validation
     if config.nfs:
         for export in config.nfs.exports:
-            if export.path not in dataset_paths:
-                errors.append(f"NFS export path '{export.path}' not in storage.datasets")
             if export.enabled:
                 for client in export.clients:
                     try:
@@ -103,8 +132,6 @@ def validate_all(config, secrets):
 
     if config.samba:
         for share in config.samba.shares:
-            if share.path not in dataset_paths:
-                errors.append(f"Samba share path '{share.path}' not in storage.datasets")
             if share.enabled:
                 for ref_path in share.users_ref:
                     try:
@@ -128,8 +155,6 @@ def validate_all(config, secrets):
             errors.append("samba.users not found in secrets")
 
     if config.iscsi:
-        if config.iscsi.dataset not in dataset_paths:
-            errors.append(f"iSCSI dataset '{config.iscsi.dataset}' not in storage.datasets")
         for target in config.iscsi.targets:
             if target.auth.session_auth == "chap":
                 try:
@@ -144,10 +169,6 @@ def validate_all(config, secrets):
                     errors.append(f"iSCSI target '{target.name}': {e}")
 
     if config.garage:
-        if config.garage.data_dir not in dataset_paths:
-            errors.append(f"Garage data_dir '{config.garage.data_dir}' not in storage.datasets")
-        if config.garage.metadata_dir not in dataset_paths:
-            errors.append(f"Garage metadata_dir '{config.garage.metadata_dir}' not in storage.datasets")
         if config.garage.enabled:
             for ref_field in ("admin_token_ref", "rpc_secret_ref"):
                 ref_path = getattr(config.garage, ref_field)
@@ -159,8 +180,6 @@ def validate_all(config, secrets):
                     errors.append(f"Garage {ref_field}: {e}")
 
     if config.ftp:
-        if config.ftp.upload_root not in dataset_paths:
-            errors.append(f"FTP upload_root '{config.ftp.upload_root}' not in storage.datasets")
         if config.ftp.enabled:
             for ref_path in config.ftp.users_ref:
                 try:

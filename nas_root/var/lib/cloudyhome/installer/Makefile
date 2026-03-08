@@ -1,12 +1,13 @@
-.PHONY: install packages pull-images pip-install permissions zedlet-symlinks systemd-setup
+.PHONY: install packages pull-images pip-install permissions validate-install zedlet-symlinks systemd-setup
 
-SBIN    := /usr/local/sbin
-LIB     := /usr/local/lib/cloudyhome
-VAR     := /var/lib/cloudyhome
-UNITDIR := /etc/systemd/system
-ZEDDIR  := /etc/zfs/zed.d
+SBIN     := /usr/local/sbin
+LIB      := /usr/local/lib/cloudyhome
+VAR      := /var/lib/cloudyhome
+UNITDIR  := /etc/systemd/system
+ZEDDIR   := /etc/zfs/zed.d
+SERVICES := $(VAR)/nas/services.yml
 
-install: packages pull-images pip-install permissions systemd-setup zedlet-symlinks
+install: packages pull-images pip-install permissions validate-install systemd-setup zedlet-symlinks
 
 # Install all required system packages.
 # sops and age are pre-installed in the base golden image and are not listed here.
@@ -27,11 +28,12 @@ packages:
 		python3-pip
 
 # Pre-pull container images so Quadlet services can start at boot without network access.
-# Minimum Garage v1.x required — layout_capacity is passed as a human-readable string (e.g. "1G"),
-# which is only supported in v1.x and later.
+# Image names are read from services.yml (.garage.image, .ftp.image) so the Makefile
+# never needs updating when versions change.
 pull-images:
-	podman pull dxflrs/garage:latest
-	podman pull delfer/alpine-ftp-server:latest
+	for image in $$(yq -r '[.garage.image, .ftp.image] | .[] | select(. != null)' $(SERVICES)); do \
+		podman pull "$$image"; \
+	done
 
 # Install the cloudyhome Python library system-wide.
 # --break-system-packages is required on Debian 12+ when installing outside a venv.
@@ -46,10 +48,14 @@ permissions:
 		$(SBIN)/nas-health-alert \
 		$(SBIN)/nas-render-config \
 		$(SBIN)/nas-validate-config \
+		$(SBIN)/nas-validate-install-phase \
 		$(SBIN)/nas-zedlet-wrapper \
 		$(SBIN)/nas-zfs-import
 	chmod 0600 $(VAR)/nas/secrets.enc.yaml
 	chown root:root $(VAR)/nas/secrets.enc.yaml
+
+validate-install:
+	nas-validate-install-phase
 
 # Post-copy systemd configuration.
 # daemon-reload picks up the unit files copied from nas_root.

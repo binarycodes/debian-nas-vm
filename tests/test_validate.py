@@ -2,7 +2,7 @@
 import copy
 import pytest
 from cloudyhome.models import NasConfig
-from cloudyhome.validate import validate_all, is_rfc1918, validate_ip_rfc1918, validate_email_domain
+from cloudyhome.validate import validate_all, validate_static, is_rfc1918, validate_ip_rfc1918, validate_email_domain
 
 
 class TestRfc1918:
@@ -193,3 +193,61 @@ class TestValidateAll:
         # Only check no health-related errors
         health_errors = [e for e in errors if "health" in e.lower() or "smtp" in e.lower() or "email" in e.lower()]
         assert health_errors == [], f"Unexpected health errors: {health_errors}"
+
+
+class TestValidateStatic:
+    def test_valid_config_no_errors(self, services_raw):
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert errors == [], f"Unexpected errors: {errors}"
+
+    def test_nfs_path_not_in_datasets(self, services_raw):
+        services_raw["nfs"]["exports"][0]["path"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("NFS export path" in e and "not in storage.datasets" in e for e in errors)
+
+    def test_samba_path_not_in_datasets(self, services_raw):
+        services_raw["samba"]["shares"][0]["path"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("Samba share path" in e and "not in storage.datasets" in e for e in errors)
+
+    def test_iscsi_dataset_not_in_datasets(self, services_raw):
+        services_raw["iscsi"]["dataset"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("iSCSI dataset" in e and "not in storage.datasets" in e for e in errors)
+
+    def test_garage_data_dir_not_in_datasets(self, services_raw):
+        services_raw["garage"]["data_dir"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("Garage data_dir" in e for e in errors)
+
+    def test_garage_metadata_dir_not_in_datasets(self, services_raw):
+        services_raw["garage"]["metadata_dir"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("Garage metadata_dir" in e for e in errors)
+
+    def test_ftp_upload_root_not_in_datasets(self, services_raw):
+        services_raw["ftp"]["upload_root"] = "/zpool0/nonexistent"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("FTP upload_root" in e for e in errors)
+
+    def test_no_secrets_required(self, services_raw):
+        config = NasConfig(**services_raw)
+        # Should not raise even with no secrets available
+        errors = validate_static(config)
+        assert isinstance(errors, list)
+
+    def test_nfs_path_wrong_pool_name(self, services_raw):
+        # Pool is "zpool0" but export path references a different pool name.
+        # The path passes dataset path format rules in isolation but is not in
+        # storage.datasets, so validate_static must catch it.
+        services_raw["nfs"]["exports"][0]["path"] = "/wrongpool/media"
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        assert any("NFS export path" in e and "not in storage.datasets" in e for e in errors)
