@@ -1,0 +1,7 @@
+Package: cloudyhome-nas
+Version: 0.1.0
+Architecture: all
+Maintainer: CloudyHome
+Depends: zfsutils-linux, nfs-kernel-server, samba, targetcli-fb, podman,
+ cloud-init, nftables, yq, smartmontools, msmtp, python3, python3-pip
+Description: CloudyHome NAS management scripts, templates, and boot chain
