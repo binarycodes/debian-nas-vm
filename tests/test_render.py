@@ -14,8 +14,12 @@ from cloudyhome.render import render_template, atomic_write, get_jinja_env
 # Import build functions from the render script (no .py extension)
 RENDER_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "sbin", "nas-render-config")
 
+import importlib.util
 from importlib.machinery import SourceFileLoader
-render_mod = SourceFileLoader("nas_render_config", RENDER_SCRIPT).load_module()
+_loader = SourceFileLoader("nas_render_config", RENDER_SCRIPT)
+_spec = importlib.util.spec_from_file_location("nas_render_config", RENDER_SCRIPT, loader=_loader)
+render_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(render_mod)
 build_context = render_mod.build_context
 build_saveconfig = render_mod.build_saveconfig
 

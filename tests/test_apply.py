@@ -9,8 +9,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "nas_root", "us
 # Import from the apply script (no .py extension, so we use SourceFileLoader directly)
 APPLY_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "sbin", "nas-apply-config")
 
+import importlib.util
 from importlib.machinery import SourceFileLoader
-apply_mod = SourceFileLoader("nas_apply_config", APPLY_SCRIPT).load_module()
+_loader = SourceFileLoader("nas_apply_config", APPLY_SCRIPT)
+_spec = importlib.util.spec_from_file_location("nas_apply_config", APPLY_SCRIPT, loader=_loader)
+apply_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(apply_mod)
 
 
 class TestParseSizeBytes:
