@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   publish-release:
     if: >
@@ -35,6 +39,9 @@ jobs:
             echo "ERROR: control file has Version: ${CONTROL_VERSION}, expected ${{ steps.version.outputs.version }}"
             exit 1
           fi
+
+      - name: lint and test
+        run: make validate
 
       - name: create and push tag
         run: |
