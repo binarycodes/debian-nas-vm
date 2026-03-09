@@ -60,10 +60,6 @@ firewall:
       ports: [21]
       proto: ["tcp"]
       sources_ref: "firewall/ftp"
-    - service: "ftp-passive"
-      port_range: [21000, 21010]
-      proto: ["tcp"]
-      sources_ref: "firewall/ftp"
 
 nfs:
   version: 4

@@ -266,7 +266,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Type: `oneshot`
 - `After=cloudyhome-zfs-import.service`
 - No `WantedBy=` — driven exclusively by the timer.
-- Runs: `zpool scrub zpool0`
+- Runs one `zpool scrub <pool>` per entry in `storage[]`; rendered from `cloudyhome-zfs-scrub.service.j2` at boot.
 - Purpose: periodic ZFS scrub to detect silent data corruption. Scrub results are reported by ZED (Section 15.4) on completion.
 
 ### 6.8 `cloudyhome-zfs-scrub.timer`
@@ -328,7 +328,7 @@ Idempotency (hard requirement):
 - Samba global + shares
 - iSCSI target/LUN mapping
 - Garage network and non-secret parameters
-- FTP listeners, passive port range, and upload policy
+- FTP listener and upload policy
 - Health alert settings (SMTP host, port, TLS mode)
 
 `secrets.enc.yaml` defines sensitive values:
@@ -375,8 +375,7 @@ All ports are on the NAS VM. Actual rules are declared in `services.yml` (`firew
 | 3900          | TCP      | Garage S3       | S3 client subnet                | Garage S3-compatible object storage API             |
 | 3901          | TCP      | Garage RPC      | No rule — blocked by default-drop | Single-node: no external RPC needed; bound to host IP, no firewall rule |
 | 3903          | TCP      | Garage admin    | No rule — blocked by default-drop | Admin API bound to host IP; blocked by firewall default-drop |
-| 21            | TCP      | FTP control     | Scanner IP only                 | Pure FTP control channel for scanner uploads        |
-| 21000–21010   | TCP      | FTP passive     | Scanner IP only                 | Passive data channels; range defined in services.yml |
+| 21            | TCP      | FTP control     | Scanner IP only                 | Pure FTP control channel for scanner uploads; passive mode not used |
 
 ## 11. Operations and Lifecycle
 
@@ -449,7 +448,7 @@ Recovery drill target:
 
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
-- **Datasets**: `storage.datasets` is a map of simple underscore-separated name to an object with `path` (mount path) and `quota` (ZFS quota) fields (e.g. `shares_media: {path: "/zpool0/shares/media", quota: "4T"}`). The ZFS dataset name in the config is the map key (e.g. `shares_media`). The apply script constructs the full ZFS name as `{storage.pool}/{key}` (e.g. `zpool0/shares_media`) and creates it via `zfs create -o mountpoint=<path> {pool}/{key}`. After creation, the quota is set via `zfs set quota=<quota> {pool}/{key}`. For existing datasets, the script reads the current quota with `zfs get -Hp -o value quota {pool}/{key}` and compares it to the configured value: if the current quota differs from the configured value (or is `none`), the script checks current usage via `zfs get -Hp -o value used {pool}/{key}`. If usage is below the configured quota, the quota is set via `zfs set quota=<quota> {pool}/{key}` (works for both increases and decreases). If usage already meets or exceeds the configured quota, the script logs an error and exits non-zero — applying the quota would make the dataset immediately full.
+- **Datasets**: `storage` is a list of pool configs; the apply script iterates each entry. Within each pool, `datasets` is a map of simple underscore-separated name to an object with `path` (mount path) and `quota` (ZFS quota) fields (e.g. `shares_media: {path: "/zpool0/shares/media", quota: "4T"}`). The ZFS dataset name in the config is the map key (e.g. `shares_media`). The apply script constructs the full ZFS name as `{pool}/{key}` (e.g. `zpool0/shares_media`) and creates it via `zfs create -o mountpoint=<path> {pool}/{key}`. After creation, the quota is set via `zfs set quota=<quota> {pool}/{key}`. For existing datasets, the script reads the current quota with `zfs get -Hp -o value quota {pool}/{key}` and compares it to the configured value: if the current quota differs from the configured value (or is `none`), the script checks current usage via `zfs get -Hp -o value used {pool}/{key}`. If usage is below the configured quota, the quota is set via `zfs set quota=<quota> {pool}/{key}` (works for both increases and decreases). If usage already meets or exceeds the configured quota, the script logs an error and exits non-zero — applying the quota would make the dataset immediately full.
 - **zvols** (iSCSI LUNs): created if missing. `iscsi.dataset` holds the absolute dataset path (e.g. `/zpool0/iscsi`); `lun.path` holds only the zvol name (e.g. `vmstore`). The apply script strips the leading `/` from `iscsi.dataset` and concatenates to get the full ZFS name (e.g. `zpool0/iscsi/vmstore`) and runs `zfs create -V <size> {dataset}/{path}`. Block device is derived as `/dev/zvol/{dataset.lstrip('/')}/{path}`. Existing zvols left untouched (size is not modified).
 
 ## 14. Finalized `services.yml` Structure
@@ -464,13 +463,13 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 ### 14.1 Design Principles
 - `services.yml` contains only non-secret intent and topology.
 - Secrets are referenced by stable IDs/paths and resolved at render time.
-- Paths that point to storage data must be under `zpool0` mount hierarchy.
+- Paths that point to storage data must be under the mount hierarchy of their respective pool.
 - Schema is explicit and strict; unknown top-level keys should fail validation.
 
 ### 14.2 Top-Level Keys
-- `version` (required, integer): schema version. Initial value: `1`.
+- `version` (required, integer): schema version. Current value: `2`.
 - `host_ip_ref` (required, string): secret path resolving to the NAS VM's LAN IP; used as bind address for all services.
-- `storage` (required, map): pool, dataset conventions, and per-dataset quotas.
+- `storage` (required, list): one or more pool configs, each with a `pool` name and `datasets` map.
 - `firewall` (required, map): nftables rule definitions.
 - `nfs` (optional, map): NFS export definitions.
 - `samba` (optional, map): Samba global and share definitions.
@@ -484,40 +483,40 @@ All of `nfs`, `samba`, `iscsi`, `garage`, and `ftp` are optional. A config with 
 ### 14.3 Canonical Schema (Field Contract)
 
 ```yaml
-version: 1
+version: 2
 
 host_ip_ref: "host/ip"              # resolves to the NAS VM's LAN IP from secrets; used as bind address for all services
 
-storage:
-  pool: "zpool0"
-  datasets:                                                          # canonical inventory; created by cloudyhome-nas-apply.service if missing; ZFS dataset name = map key
-    system:                                                          # NAS system/state parent dataset
-      path: "/zpool0/system"
-      quota: "10G"
-    system_garage:                                                   # Garage state parent dataset
-      path: "/zpool0/system/garage"
-      quota: "50G"
-    system_garage_data:                                              # Garage data directory (bind-mounted into container)
-      path: "/zpool0/system/garage/data"
-      quota: "500G"
-    system_garage_meta:                                              # Garage metadata directory (bind-mounted into container)
-      path: "/zpool0/system/garage/meta"
-      quota: "10G"
-    shares:                                                          # file shares parent dataset
-      path: "/zpool0/shares"
-      quota: "5T"
-    shares_media:                                                    # shared media (NFS + Samba)
-      path: "/zpool0/shares/media"
-      quota: "4T"
-    shares_scanner_inbox:                                            # FTP upload root
-      path: "/zpool0/shares/scanner-inbox"
-      quota: "50G"
-    iscsi:                                                           # zvol parent dataset for iSCSI LUNs
-      path: "/zpool0/iscsi"
-      quota: "500G"
-    backups:                                                         # backup target dataset (snapshots/replication landing)
-      path: "/zpool0/backups"
-      quota: "2T"
+storage:                                                             # list of pool configs; must be non-empty; pool names must be unique
+  - pool: "zpool0"
+    datasets:                                                        # canonical inventory; created by cloudyhome-nas-apply.service if missing; ZFS dataset name = map key
+      system:                                                        # NAS system/state parent dataset
+        path: "/zpool0/system"
+        quota: "10G"
+      system_garage:                                                 # Garage state parent dataset
+        path: "/zpool0/system/garage"
+        quota: "50G"
+      system_garage_data:                                            # Garage data directory (bind-mounted into container)
+        path: "/zpool0/system/garage/data"
+        quota: "500G"
+      system_garage_meta:                                            # Garage metadata directory (bind-mounted into container)
+        path: "/zpool0/system/garage/meta"
+        quota: "10G"
+      shares:                                                        # file shares parent dataset
+        path: "/zpool0/shares"
+        quota: "5T"
+      shares_media:                                                  # shared media (NFS + Samba)
+        path: "/zpool0/shares/media"
+        quota: "4T"
+      shares_scanner_inbox:                                          # FTP upload root
+        path: "/zpool0/shares/scanner-inbox"
+        quota: "50G"
+      iscsi:                                                         # zvol parent dataset for iSCSI LUNs
+        path: "/zpool0/iscsi"
+        quota: "500G"
+      backups:                                                       # backup target dataset (snapshots/replication landing)
+        path: "/zpool0/backups"
+        quota: "2T"
 
 firewall:
   default_input: "drop"              # drop | accept
@@ -544,10 +543,6 @@ firewall:
       sources_ref: "firewall/garage-s3"
     - service: "ftp"
       ports: [21]
-      proto: ["tcp"]
-      sources_ref: "firewall/ftp"
-    - service: "ftp-passive"
-      port_range: [21000, 21010]     # inclusive range; maps to nftables tcp dport 21000-21010
       proto: ["tcp"]
       sources_ref: "firewall/ftp"
 
@@ -588,7 +583,7 @@ samba:
 iscsi:
   base_iqn: "iqn.2026-03.home.arpa:nas01"
   portal_port: 3260                    # bind IP resolved from host_ip_ref; single portal, single NIC — multipath not required for this deployment
-  dataset: "/zpool0/iscsi"             # absolute path of the parent ZFS dataset; must exist in storage.datasets
+  dataset: "/zpool0/iscsi"             # absolute path of the parent ZFS dataset; must match a path in storage[*].datasets
   targets:
     - name: "vmstore"
       iqn_suffix: "vmstore"
@@ -626,16 +621,13 @@ garage:
 ftp:
   # TLS is intentionally not supported. This FTP instance is for internal scanner uploads only;
   # access is restricted to the scanner IP at the firewall. Plain FTP is acceptable in this context.
+  # Passive mode is not used; only the control port (21) is needed.
   enabled: true
   runtime: "podman-quadlet-root"
   quadlet_name: "cloudyhome-ftp"
   image: "delfer/alpine-ftp-server:latest"
   config_dir: "/etc/cloudyhome/ftp"     # host directory for rendered ftp.env; mounted into container
-  # bind address resolved from top-level host_ip_ref; maps to ADDRESS env
   control_port: 21
-  passive_ports:
-    min: 21000                              # maps to MIN_PORT env
-    max: 21010                              # maps to MAX_PORT env
   users_ref: ["ftp/users/scanner1"]          # list of ref paths; each resolves to a user entry in ftp.users map in secrets; maps to USERS env
   upload_root: "/zpool0/shares/scanner-inbox"
 
@@ -656,7 +648,7 @@ health:
 **Global email domain policy**: When `health.alert.enabled=true`, every value that represents an email address anywhere in `secrets.enc.yaml` must have its domain part (everything after `@`) match one of the entries in the top-level `allowed_email_domains` list in secrets. Comparison is case-insensitive. This applies to `health.addresses.from_address`, `health.addresses.to_address`, and any other email address field. `health.smtp_auth.username` is exempt — it is an authentication credential, not an email address. Validation fails if any email address uses a domain not in the allowed list. `allowed_email_domains` must be a non-empty list of non-empty strings when `health.alert.enabled=true`; it may be absent or omitted when alerting is disabled or `health` is not configured.
 
 - `disks.ids` in secrets must be a non-empty list of non-empty strings. Empty list or absent key is a fatal error. (Runtime disk presence verification — checking that `/dev/disk/by-id/<id>` exists for each entry — is performed by `cloudyhome-zfs-import.service` (Section 6.2), not by schema validation.)
-- `version` must equal `1`.
+- `version` must equal `2`.
 - `host_ip_ref` is required and must resolve to a valid RFC1918 IP address in secrets.
 - `firewall` is required; omitting it is a validation error.
 - `firewall.default_input` must be one of `drop` or `accept`.
@@ -669,14 +661,14 @@ health:
 - `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy). Bare IPv4 addresses without a prefix length (e.g. `"192.168.1.50"`) are accepted and treated as `/32`; the renderer must emit them with an explicit `/32` suffix in the nftables rule.
 - A rule may not define both `ports` and `port_range`.
 - **Firewall rules are literal**: the renderer emits nftables rules exactly as declared — no merging, deduplication, or cross-validation against service config ports. It is the operator's responsibility to keep firewall rules consistent with service ports. Port overlaps between rules (same port, same protocol) are not rejected; they produce separate nftables rules as written.
-- `storage.pool` is a required non-empty string. All `storage.datasets[*].path` values must start with `/{pool}/` — the model validates this consistency. The pool name drives ZFS dataset and zvol construction throughout the apply and render scripts.
-- `storage.datasets` must be a non-empty map with unique keys and unique `path` values.
+- `storage` must be a non-empty list; pool names across all entries must be unique.
+- Each pool entry's `pool` field is a required non-empty string. All `datasets[*].path` values within that entry must start with `/{pool}/` — the model validates this consistency per pool. The pool name drives ZFS dataset construction throughout the apply and scrub scripts.
+- `storage[*].datasets` must be a non-empty map with unique keys and unique `path` values within that pool.
 - Each key must be a non-empty underscore-separated identifier (simple name, e.g. `shares_media`).
 - Each value must be a map with required keys `path` and `quota`.
-- `path` must be an absolute mount path starting with `/zpool0/`. The ZFS dataset name is the map key (e.g. `shares_media`); the apply script constructs the full ZFS name as `{storage.pool}/{key}` for ZFS commands.
+- `path` must be an absolute mount path under the pool's root (e.g. `/zpool0/...`). The ZFS dataset name is the map key; the apply script constructs the full ZFS name as `{pool}/{key}` for ZFS commands.
 - `quota` must be a valid ZFS size string (integer followed by a unit suffix: `K`, `M`, `G`, or `T`, e.g. `"500G"`, `"2T"`).
-- Any `path` intended for data export must start with `/zpool0/`.
-- **Path-to-dataset cross-validation**: every service data path must match a `path` value in `storage.datasets` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`, `iscsi.dataset`. Unmatched paths fail validation.
+- **Path-to-dataset cross-validation**: every service data path must match a `path` value across all pools in `storage` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`, `iscsi.dataset`. Unmatched paths fail validation.
 - `nfs.version` must be `4`. NFSv3 is not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `nfs.exports` must be a non-empty list when `nfs` is present.
 - `nfs.exports[*].name` must be unique.
@@ -716,7 +708,7 @@ health:
 - If `session_auth=chap`, `chap_secret_ref` is required and must resolve to a map with two non-empty string fields: `chap_user` and `chap_password`.
 - `iscsi.targets[*].luns[*].type` must be `"zvol"`. No other LUN types are supported in this deployment.
 - `iscsi.targets[*].luns[*].size` is required for `type=zvol` and must be a valid ZFS size string (e.g. `"100G"`).
-- `iscsi.dataset` is required when `iscsi` is present; must be an absolute path (e.g. `/zpool0/iscsi`) and must match a path in `storage.datasets`. Cross-validated in `validate_all`.
+- `iscsi.dataset` is required when `iscsi` is present; must be an absolute path (e.g. `/zpool0/iscsi`) and must match a path in `storage[*].datasets`. Cross-validated in `validate_all`.
 - `iscsi.targets[*].luns[*].path` is the zvol name only (e.g. `vmstore`); the apply script combines `iscsi.dataset.lstrip('/')` with `lun.path` for both `zfs create -V` and `/dev/zvol/` derivation (block device: `/dev/zvol/{dataset.lstrip('/')}/{path}`).
 - `garage.enabled=true` requires:
   - `runtime=podman-quadlet-root`
@@ -738,8 +730,7 @@ health:
   - `config_dir` must be a non-empty absolute path; the renderer writes `ftp.env` into this directory and the Quadlet mounts it into the container
   - non-empty `image` (FTP container image is `delfer/alpine-ftp-server`; version pinning is managed in the Quadlet file, not validated here)
   - `control_port` must be `21`. Hardware scanners expect the standard FTP control port; non-standard values are not supported in this deployment.
-  - valid passive range (`passive_ports.min <= passive_ports.max`)
-  - `upload_root` under `/zpool0/`
+  - `upload_root` must be an absolute path matching a dataset path in `storage`
   - `users_ref` must be a non-empty list of ref path strings
 - `ftp.users` in secrets must be a non-empty map with unique keys (each key is a username).
 - Each `ftp.users_ref` path must resolve to an entry in the `ftp.users` map in secrets (e.g., `"ftp/users/scanner1"` resolves to the `scanner1` key). Unresolvable paths fail closed.

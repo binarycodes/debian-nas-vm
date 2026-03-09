@@ -129,8 +129,6 @@ class TestTemplateRendering:
         assert "tcp dport 22" in content
         assert "10.0.0.0/24" in content
         assert 'comment "ssh"' in content
-        # Port range for ftp-passive
-        assert "21000-21010" in content
 
     def test_exports_renders(self, full_context, template_dir):
         ctx, config = full_context
