@@ -42,6 +42,7 @@ jobs:
 
       - name: lint and test
         run: make validate
+        working-directory: ./tests
 
       - name: create and push tag
         run: |
