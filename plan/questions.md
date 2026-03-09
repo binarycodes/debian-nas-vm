@@ -4,83 +4,51 @@
 
 ## MVP2 Questions
 
-### Q1: API Port
+### Q1: API Port — DECIDED
 
-What port should the management API listen on?
+**Decision:** Port **9443**. The API is always HTTPS.
 
 The firewall section of `services.yml` requires this port to be explicitly allowed from admin hosts. It must not conflict with NFS (2049), Samba (445, 139), iSCSI (3260), Garage (3900, 3901, 3902), or FTP (21, passive range).
-
-**Candidates:** 9090, 8443, 7443, 19090
 
 **Impact:** Baked into example `services.yml`, packer-checklist.md, and eventually the Terraform provider default config in MVP3.
 
 ---
 
-### Q2: TLS Certificate Strategy
+### Q2: TLS Certificate Strategy — DECIDED
 
-The API must serve HTTPS. Three options:
+**Decision:** Generate a self-signed cert at first boot, but only if no cert is already present at the expected path. If a cert/key pair has been injected (by Packer, cloud-init, or any other mechanism) before first boot, it is used as-is.
 
-**Option A — Self-signed cert generated at first boot**
-- A one-shot systemd service or API startup hook runs `openssl req -x509` and writes to `/etc/cloudyhome/api/tls.{crt,key}`.
-- Clients (curl, web UI, Terraform provider) must trust or pin this cert explicitly.
-- Pro: fully automated, no external dependencies.
-- Con: cert changes if the VM is rebuilt; clients must be updated with the new cert each time.
+**Behaviour:**
+- A one-shot systemd service (`cloudyhome-nas-tls.service`) runs before `cloudyhome-nas-api.service`.
+- It checks for `/etc/cloudyhome/api/tls.crt` and `/etc/cloudyhome/api/tls.key`.
+- If both exist, it exits immediately (no-op).
+- If either is missing, it generates a self-signed cert with `openssl req -x509` and writes both files.
 
-**Option B — Cert injected at Packer build time**
-- A TLS cert/key pair is generated externally and injected alongside `services.yml` and `secrets.enc.yaml`.
-- Survives VM rebuilds if the same cert/key pair is re-injected.
-- Pro: stable cert across rebuilds.
-- Con: adds an extra Packer provisioner step and a cert management concern.
-
-**Option C — `insecure_skip_verify` for now, revisit later**
-- API serves with a self-signed cert but clients skip verification.
-- Simplest for development. Acceptable for a home NAS on a private RFC1918 network.
-- Pro: no cert pinning complexity for any client.
-- Con: MITM possible on the LAN (low risk for home use).
-
-Which strategy is acceptable?
+**Implication for clients:** Clients that need a stable cert (Terraform provider, web UI) can inject one via Packer/cloud-init at a path the service checks first. Operators who don't care (e.g., home lab curl usage) get an auto-generated cert with `--insecure` or manual trust-on-first-use.
 
 ---
 
-### Q3: Dataset Path Derivation in the API
+### Q3: Dataset Path Derivation in the API — DECIDED
 
-In MVP1, `StorageDataset` has both a `key` (dict key in YAML) and a `path` (explicit full path like `/zpool0/media`). The API could handle this two ways:
+**Decision:** Option A — caller provides path explicitly.
 
-**Option A — Caller provides path explicitly**
-- POST body includes `{ "key": "media", "path": "/zpool0/media", "quota": "500G" }`.
-- Matches the existing model exactly. No inference magic.
-- Con: redundant; caller must know the pool name and provide a consistent path.
-
-**Option B — API derives path from pool name + key**
-- POST body is `{ "key": "media", "quota": "500G" }`.
-- API derives `path = /<pool>/<key>` automatically.
-- Pro: simpler surface, fewer validation errors.
-- Con: less explicit; non-default mountpoints are not possible.
-
-Which is preferred?
+POST body includes `{ "key": "media", "path": "/zpool0/media", "quota": "500G" }`. Matches the existing model exactly. With a pool array, the API has no way to know which pool the caller intends, so path derivation is not possible.
 
 ---
 
-### Q4: services.yml Persistence on the Zpool
+### Q4: services.yml Persistence on the Zpool — DECIDED
 
-After a VM rebuild, the Packer image has the original bootstrap `services.yml`. API clients (Terraform in MVP3, or manual calls) must re-converge the running state.
+**Decision:** No zpool mirroring. Keep it simple and automation-friendly.
 
-Should `services.yml` also be stored on a ZFS dataset (on the zpool, which survives VM rebuilds) so that after a rebuild and pool import the API finds the latest config automatically?
-
-- **Yes (zpool copy):** The API writes `services.yml` to both `/var/lib/cloudyhome/nas/services.yml` and a mirrored path on the zpool (e.g., `/zpool0/.cloudyhome/services.yml`). On startup, if the zpool mirror exists, it takes precedence over the baked-in copy.
-- **No (re-convergence only):** The baked-in `services.yml` is the recovery starting point. Clients re-converge afterward. Simpler, no dual-write logic.
+The API exposes a download endpoint for the current `services.yml` and `secrets.enc.yaml`. An automation pipeline (CI, Terraform, cron) pulls the config after every change and feeds it into the next Packer build automatically. On rebuild, the baked-in copy is the starting point — no dual-write logic, no zpool dependency at startup. The burden of rebaking is on the automation, not the operator.
 
 ---
 
-### Q5: iSCSI zvol Destroy Behavior
+### Q5: iSCSI zvol Destroy Behavior — DECIDED
 
-When a `DELETE /v1/iscsi/targets/{name}` request is processed:
-- Should the API automatically `zfs destroy` the backing zvol(s)?
-- Or should zvol cleanup require a separate `DELETE /v1/datasets/{key}` call that the operator sequences explicitly?
+**Decision:** Explicit dataset delete required. Deleting an iSCSI target does not destroy the backing zvol — a separate `DELETE /v1/datasets/{key}` call is needed.
 
-Automatically destroying the zvol is convenient but irreversible. Requiring an explicit dataset delete is safer but more steps.
-
-**Leaning toward:** require explicit dataset delete (consistent with how NFS/Samba also require explicit dataset management). Confirm?
+Keeps operations explicit and automation-friendly: pipelines sequence the calls deliberately, nothing is destroyed implicitly. Consistent with how NFS/Samba handle dataset lifecycle.
 
 ---
 
@@ -95,26 +63,30 @@ MVP2 does not support updating `secrets.enc.yaml` at runtime. Is this acceptable
 
 ---
 
-### Q7: Pinned Management API Firewall Rule
+### Q7: Pinned Management API Firewall Rule — DECIDED
 
-The firewall rule that allows access to the management API port must always be present — if it is deleted, the API becomes unreachable. Three options:
+**Decision:** Option C — operator's responsibility. Document it, no enforcement.
 
-**Option A — Warn at startup:** On startup, check that a rule for the API port exists in `services.yml`. Log a warning if missing, but don't fail.
-
-**Option B — Pin in nftables template:** `nftables.conf.j2` always emits an allow rule for the API port regardless of the `firewall.rules` list. Cannot be accidentally deleted.
-
-**Option C — Operator's responsibility:** Document the requirement. No enforcement.
-
-Option B is the safest but departs from the fully declarative firewall model. Option A is a soft guard. Option C is simplest.
+Operators may choose not to enable or use the API at all. Pinning a firewall rule for it would be presumptuous. The declarative firewall model stays clean.
 
 ---
 
-### Q8: Samba User Deletion
+### Q8: Samba User Deletion — DECIDED
 
-When the last Samba share referencing an OS user is deleted via the API, should the OS user be automatically deleted?
+**Decision:** No auto-delete of OS users. When the last share referencing a user is removed, the user remains on the system.
 
-Pros of auto-delete: clean system state.
-Cons: the user may own files on a dataset; `userdel` could leave orphaned UIDs on those files. If two shares reference the same user and one is deleted, the user must obviously be retained.
+Rationale: the user may own files on a dataset; `userdel` could orphan UIDs. Explicit is safer and consistent with the automation-first principle — let the operator sequence cleanup deliberately.
 
-**Leaning toward:** never auto-delete OS users in MVP2. Document it as a manual cleanup step. Confirm?
+Cleanup is handled via the users API (see Q9).
+
+---
+
+### Q9: OS User Management API
+
+Since Samba users are not auto-deleted, orphaned OS users will accumulate over time. The API needs endpoints to let operators manage them:
+
+- `GET /v1/users` — list OS users created by the API (Samba users), including which shares (if any) still reference them.
+- `DELETE /v1/users/{username}` — delete an OS user explicitly. Should the API refuse if the user still owns files on a managed dataset, or just warn?
+
+**Open:** Should delete be blocked when shares still reference the user, or should that be a client-side concern? Should file ownership checks be in scope for MVP2?
 

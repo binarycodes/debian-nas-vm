@@ -1,5 +1,42 @@
 # MVP2: NAS Management API
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Goals](#goals)
+- [Future Consumers — Design Constraint](#future-consumers--design-constraint)
+- [Architecture](#architecture)
+  - [State Ownership: API mutates services.yml](#state-ownership-api-mutates-servicesyml)
+  - [Management API](#management-api)
+  - [Systemd Integration](#systemd-integration)
+  - [Relationship to MVP1](#relationship-to-mvp1)
+- [API Design](#api-design)
+  - [Authentication](#authentication)
+  - [TLS](#tls)
+  - [API Port](#api-port)
+  - [Response Shape Convention](#response-shape-convention)
+  - [Endpoints](#endpoints)
+  - [Error Handling](#error-handling)
+  - [Locking](#locking)
+- [Render/Apply Flow (API Path)](#renderapply-flow-api-path)
+- [Resource Lifecycle Details](#resource-lifecycle-details)
+  - [Datasets](#datasets)
+  - [NFS Exports](#nfs-exports)
+  - [Samba Shares](#samba-shares)
+  - [iSCSI Targets](#iscsi-targets)
+  - [Firewall Rules](#firewall-rules)
+- [Secrets Handling in the API](#secrets-handling-in-the-api)
+- [Out of Scope for MVP2](#out-of-scope-for-mvp2)
+- [Implementation Plan](#implementation-plan)
+  - [Phase 0: Extract Python Package](#phase-0-extract-python-package)
+  - [Phase 1: API Foundation](#phase-1-api-foundation)
+  - [Phase 2: Dataset and Firewall CRUD](#phase-2-dataset-and-firewall-crud)
+  - [Phase 3: NFS and Samba CRUD](#phase-3-nfs-and-samba-crud)
+  - [Phase 4: iSCSI CRUD](#phase-4-iscsi-crud)
+  - [Phase 5: Integration Testing and Documentation](#phase-5-integration-testing-and-documentation)
+- [Open Questions](#open-questions)
+
 ## Overview
 
 MVP1 establishes the NAS boot chain: image-baked config, boot-time render, and idempotent apply. Config changes require a full VM replacement cycle (new Packer image, Terraform destroy/create). The ZFS pool and data survive because disks are passed through by stable IDs.
@@ -17,6 +54,7 @@ MVP2 adds a management API running on the NAS VM so that day-2 operations (addin
 - Maintain the same safety guarantees as MVP1: validation before apply, atomic config writes, idempotent operations, RFC1918 enforcement.
 - Keep the MVP1 boot chain intact as the bootstrap and disaster-recovery path — the API is a day-2 overlay, not a replacement.
 - `services.yml` remains the single source of truth at all times.
+- Extract the `cloudyhome` Python package into a standalone `cloudyhome-nas` project (publishable to PyPI, installable via pip) to establish a clean separation between library code, CLI entry points, and the OS filesystem layout.
 
 ## Future Consumers — Design Constraint
 
@@ -82,7 +120,7 @@ Bearer token auth. The token is stored in `secrets.enc.yaml` at a known path (e.
 
 ### TLS
 
-The API listens on HTTPS only. A self-signed TLS certificate and private key are generated at first boot (via `openssl` in the API's startup or a separate one-shot systemd service) and stored at a fixed path (e.g., `/etc/cloudyhome/api/tls.{crt,key}`). See questions.md for the cert strategy options.
+The API listens on HTTPS only. TLS cert and key are stored at `/etc/cloudyhome/api/tls.{crt,key}`. A one-shot systemd service (`cloudyhome-nas-tls.service`) runs before `cloudyhome-nas-api.service` and generates a self-signed cert with `openssl req -x509` **only if the files are not already present**. Operators who want a stable cert (e.g., for the Terraform provider or web UI) can inject a cert/key pair via Packer or cloud-init at that path; the service will detect it and skip generation.
 
 ### API Port
 
@@ -178,7 +216,7 @@ All non-2xx responses use the standard error envelope: `{ "error": "<code>", "me
 
 ### Locking
 
-Every mutating request acquires the shared lock file (same path as `RENDER_LOCK` in MVP1) using non-blocking `flock`. If the lock is held (by another API request or by the boot chain), the API returns 409 immediately. The lock is held only for the duration of validate → read services.yml → mutate → render → apply → write services.yml. It is released before the response is returned.
+Every mutating request acquires both shared lock files (`RENDER_LOCK` and `APPLY_LOCK` from MVP1) using non-blocking `flock`. Both must be acquired before proceeding; if either is held (by another API request or by the boot chain), the API returns 409 immediately and releases any lock already acquired. Both locks are held for the duration of validate → read services.yml → mutate → render → apply → write services.yml, and are released before the response is returned.
 
 The boot chain services use `LOCK_EX | LOCK_NB` (fail-fast), same as the existing scripts. The API uses the same semantics.
 
@@ -192,7 +230,7 @@ When the API receives a mutating request (POST/PUT/DELETE):
 4. Load current `services.yml` into a `NasConfig` object.
 5. Apply the requested mutation in memory (add/update/remove the resource from the config).
 6. Run cross-field validation on the mutated config (`validate_static`).
-7. Decrypt secrets and run full validation (`validate_all`) — needed to confirm secret refs still resolve.
+7. Run full validation (`validate_all`) using the in-memory decrypted secrets (already held since startup) — needed to confirm secret refs still resolve.
 8. Re-render all affected config file(s) using the Jinja2 pipeline.
 9. Apply changes:
    - ZFS: create/destroy datasets or zvols.
@@ -254,14 +292,32 @@ Secrets passed in API request bodies (e.g., Samba user passwords, CHAP credentia
 
 ## Implementation Plan
 
+### Phase 0: Extract Python Package
+
+Move the `cloudyhome` Python package out of `nas_root/` into a standalone project that can be published to PyPI and installed via pip.
+
+- Create `cloudyhome-nas/` at the repo root with `pyproject.toml` and `src/cloudyhome/` layout.
+- Move `nas_root/usr/local/lib/cloudyhome/cloudyhome/*.py` → `cloudyhome-nas/src/cloudyhome/`.
+- Create `cloudyhome-nas/src/cloudyhome/cmd/` and move each Python sbin script's `main()` (plus helpers) into a dedicated module:
+  - `nas-render-config` → `cloudyhome.cmd.render`
+  - `nas-apply-config` → `cloudyhome.cmd.apply`
+  - `nas-validate-config` → `cloudyhome.cmd.validate`
+  - `nas-validate-install-phase` → `cloudyhome.cmd.validate_install`
+  - `nas-garage-bootstrap` → `cloudyhome.cmd.garage`
+- Promote `build_saveconfig` and `build_context` from `nas-render-config` into `cloudyhome.render` (not into `cloudyhome.cmd.render`) so the API can import them as library functions without depending on a cmd module.
+- Declare `[project.scripts]` entry points in `pyproject.toml` (pip installs these to `/usr/local/bin/`). Add `fastapi` and `uvicorn[standard]` to dependencies now so they are present from Phase 1 onward.
+- Delete `nas_root/usr/local/lib/cloudyhome/` and the five Python sbin scripts.
+- Update the four affected systemd unit `ExecStart` paths from `/usr/local/sbin/` to `/usr/local/bin/` (`nas-validate-config`, `nas-render-config`, `nas-apply-config`, `nas-garage-bootstrap`). Bash scripts (`nas-zfs-import`, `nas-health-alert`, `nas-zedlet-wrapper`) stay in `/usr/local/sbin/` unchanged.
+- Update `packaging/build.sh`: build a wheel from `cloudyhome-nas/` and copy it into the staging area under `/usr/share/cloudyhome/`.
+- Update `nas_root/var/lib/cloudyhome/installer/Makefile`: `pip-install` target installs from `/usr/share/cloudyhome/cloudyhome_nas-*.whl`; remove Python scripts from the `permissions` target.
+
 ### Phase 1: API Foundation
 
-- Add FastAPI + uvicorn to the Python package dependencies.
 - Implement startup routine: decrypt secrets into tmpfs, resolve API token.
-- Implement shared lock acquisition wrapper (reuses `fcntl` logic from render scripts).
+- Implement shared lock acquisition wrapper (acquires both `RENDER_LOCK` and `APPLY_LOCK`, reuses `fcntl` logic from render scripts).
 - Implement `GET /v1/health` (no auth required).
-- Implement TLS cert generation at first boot (one-shot systemd service or API startup hook).
-- Add `cloudyhome-nas-api.service` systemd unit (after `cloudyhome-nas-apply.service`).
+- Implement `cloudyhome-nas-tls.service` (one-shot, before the API service): generate self-signed cert with `openssl req -x509` only if `/etc/cloudyhome/api/tls.{crt,key}` are not already present.
+- Add `cloudyhome-nas-api.service` systemd unit (after `cloudyhome-nas-apply.service`; `ExecStart=/usr/local/bin/nas-api`).
 - Add the management port to the firewall section in the example `services.yml`.
 
 ### Phase 2: Dataset and Firewall CRUD
@@ -280,7 +336,7 @@ Secrets passed in API request bodies (e.g., Samba user passwords, CHAP credentia
 ### Phase 4: iSCSI CRUD
 
 - Implement iSCSI target endpoints.
-- Reuse `build_saveconfig` from the render script.
+- Reuse `build_saveconfig` from `cloudyhome.render` (promoted there in Phase 0).
 - Implement zvol create with busy-check before delete.
 - Add tests.
 
