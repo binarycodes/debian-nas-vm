@@ -102,11 +102,16 @@ class TestZfsImportScript:
     def test_validates_pool_name_not_null(self):
         path = os.path.join(SBIN_DIR, "nas-zfs-import")
         content = open(path).read()
-        assert 'Could not read storage.pool' in content
+        assert 'No pools found in storage configuration' in content or 'Invalid pool name' in content
         # validation must happen before zpool import
-        pool_check_pos = content.index("Could not read storage.pool")
+        pool_check_pos = content.index("No pools found in storage configuration")
         import_pos = content.index("zpool import")
         assert pool_check_pos < import_pos
+
+    def test_imports_multiple_pools(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert 'storage[].pool' in content
 
     def test_validates_disk_ids_not_empty(self):
         path = os.path.join(SBIN_DIR, "nas-zfs-import")

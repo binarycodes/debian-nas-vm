@@ -3,7 +3,7 @@ import copy
 import pytest
 from pydantic import ValidationError
 from cloudyhome.models import (
-    NasConfig, StorageConfig, StorageDataset, FirewallConfig, FirewallRule,
+    NasConfig, PoolConfig, StorageDataset, FirewallConfig, FirewallRule,
     NfsConfig, NfsExport, NfsClient, IdentityMap, SambaConfig, SambaShare,
     SambaGlobal, IscsiConfig, IscsiTarget, IscsiLun, IscsiAuth,
     GarageConfig, FtpConfig, HealthConfig, HealthAlert,
@@ -14,12 +14,12 @@ from cloudyhome.models import (
 class TestNasConfigTopLevel:
     def test_valid_full_config(self, services_raw):
         config = NasConfig(**services_raw)
-        assert config.version == 1
+        assert config.version == 2
         assert config.host_ip_ref == "host/ip"
 
-    def test_version_must_be_1(self, services_raw):
-        services_raw["version"] = 2
-        with pytest.raises(ValidationError, match="version must be 1"):
+    def test_version_must_be_2(self, services_raw):
+        services_raw["version"] = 1
+        with pytest.raises(ValidationError, match="version must be 2"):
             NasConfig(**services_raw)
 
     def test_host_ip_ref_required(self, services_raw):
@@ -40,18 +40,18 @@ class TestNasConfigTopLevel:
         assert config.samba is None
 
 
-class TestStorageConfig:
+class TestPoolConfig:
     def test_pool_can_be_any_name(self):
-        config = StorageConfig(pool="tank", datasets={"x": {"path": "/tank/x", "quota": "1G"}})
+        config = PoolConfig(pool="tank", datasets={"x": {"path": "/tank/x", "quota": "1G"}})
         assert config.pool == "tank"
 
     def test_datasets_non_empty(self):
         with pytest.raises(ValidationError, match="datasets must be non-empty"):
-            StorageConfig(pool="zpool0", datasets={})
+            PoolConfig(pool="zpool0", datasets={})
 
     def test_path_must_match_pool(self):
         with pytest.raises(ValidationError, match="path must start with /zpool0/"):
-            StorageConfig(pool="zpool0", datasets={"x": {"path": "/tank/data", "quota": "1G"}})
+            PoolConfig(pool="zpool0", datasets={"x": {"path": "/tank/data", "quota": "1G"}})
 
     def test_quota_format(self):
         for valid in ("10G", "500M", "2T", "1024K"):
@@ -63,16 +63,47 @@ class TestStorageConfig:
 
     def test_unique_dataset_paths(self):
         with pytest.raises(ValidationError, match="dataset paths must be unique"):
-            StorageConfig(pool="zpool0", datasets={
+            PoolConfig(pool="zpool0", datasets={
                 "a": {"path": "/zpool0/same", "quota": "1G"},
                 "b": {"path": "/zpool0/same", "quota": "2G"},
             })
 
     def test_dataset_key_format(self):
         with pytest.raises(ValidationError, match="must be underscore-separated lowercase"):
-            StorageConfig(pool="zpool0", datasets={
+            PoolConfig(pool="zpool0", datasets={
                 "Invalid-Key": {"path": "/zpool0/x", "quota": "1G"},
             })
+
+
+_MINIMAL_FIREWALL = {
+    "default_input": "drop",
+    "rules": [{"service": "ssh", "ports": [22], "proto": ["tcp"], "sources_ref": "fw/ssh"}],
+}
+
+
+class TestNasConfigStorage:
+    def _make_config(self, storage):
+        return {
+            "version": 2,
+            "host_ip_ref": "host/ip",
+            "storage": storage,
+            "firewall": _MINIMAL_FIREWALL,
+        }
+
+    def test_storage_non_empty(self):
+        with pytest.raises(ValidationError, match="storage must contain at least one pool"):
+            NasConfig(**self._make_config([]))
+
+    def test_unique_pool_names(self):
+        pool = {"pool": "zpool0", "datasets": {"x": {"path": "/zpool0/x", "quota": "1G"}}}
+        with pytest.raises(ValidationError, match="pool names must be unique"):
+            NasConfig(**self._make_config([pool, pool]))
+
+    def test_multi_pool_accepted(self):
+        pool1 = {"pool": "zpool0", "datasets": {"x": {"path": "/zpool0/x", "quota": "1G"}}}
+        pool2 = {"pool": "tank", "datasets": {"y": {"path": "/tank/y", "quota": "2G"}}}
+        config = NasConfig(**self._make_config([pool1, pool2]))
+        assert len(config.storage) == 2
 
 
 class TestFirewallConfig:

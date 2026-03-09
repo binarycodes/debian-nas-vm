@@ -44,7 +44,7 @@ def validate_static(config):
     """Run static cross-field validation rules (no secrets required). Returns list of error strings."""
     errors = []
 
-    dataset_paths = set(d.path for d in config.storage.datasets.values())
+    dataset_paths = set(d.path for pool in config.storage for d in pool.datasets.values())
 
     if config.nfs:
         for export in config.nfs.exports:

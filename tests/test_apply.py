@@ -82,12 +82,11 @@ class TestApplyStructure:
 # ---------------------------------------------------------------------------
 
 _MINIMAL_RAW = {
-    "version": 1,
+    "version": 2,
     "host_ip_ref": "host/ip",
-    "storage": {
-        "pool": "zpool0",
-        "datasets": {"data": {"path": "/zpool0/data", "quota": "10G"}},
-    },
+    "storage": [
+        {"pool": "zpool0", "datasets": {"data": {"path": "/zpool0/data", "quota": "10G"}}},
+    ],
     "firewall": {
         "default_input": "drop",
         "rules": [{"service": "ssh", "ports": [22], "proto": ["tcp"], "sources_ref": "fw/ssh"}],
@@ -247,6 +246,32 @@ class TestCreateDatasets:
 
         with pytest.raises(RuntimeError, match="Cannot set quota"):
             apply_mod.create_datasets(config)
+
+    def test_creates_datasets_across_two_pools(self, monkeypatch):
+        from cloudyhome.models import NasConfig
+        two_pool_raw = {
+            "version": 2,
+            "host_ip_ref": "host/ip",
+            "storage": [
+                {"pool": "zpool0", "datasets": {"data": {"path": "/zpool0/data", "quota": "10G"}}},
+                {"pool": "tank", "datasets": {"media": {"path": "/tank/media", "quota": "10G"}}},
+            ],
+            "firewall": {
+                "default_input": "drop",
+                "rules": [{"service": "ssh", "ports": [22], "proto": ["tcp"], "sources_ref": "fw/ssh"}],
+            },
+        }
+        config = NasConfig(**two_pool_raw)
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        created = [c for c in calls if c[:2] == ["zfs", "create"]]
+        assert any("zpool0/data" in arg for cmd in created for arg in cmd)
+        assert any("tank/media" in arg for cmd in created for arg in cmd)
 
 
 class TestCreateZvols:

@@ -34,7 +34,7 @@ SMTP_DEFAULT_PORT     = 587
 SMTP_VALID_TLS_MODES  = frozenset({"starttls", "tls", "off"})
 
 # --- NasConfig schema version ---
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 # --- Config and secrets inputs ---
 SERVICES_PATH = "/var/lib/cloudyhome/nas/services.yml"

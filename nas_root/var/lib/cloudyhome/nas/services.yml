@@ -1,37 +1,37 @@
-version: 1
+version: 2
 
 host_ip_ref: "host/ip"
 
 storage:
-  pool: "zpool0"
-  datasets:
-    system:
-      path: "/zpool0/system"
-      quota: "10G"
-    system_garage:
-      path: "/zpool0/system/garage"
-      quota: "50G"
-    system_garage_data:
-      path: "/zpool0/system/garage/data"
-      quota: "500G"
-    system_garage_meta:
-      path: "/zpool0/system/garage/meta"
-      quota: "10G"
-    shares:
-      path: "/zpool0/shares"
-      quota: "5T"
-    shares_media:
-      path: "/zpool0/shares/media"
-      quota: "4T"
-    shares_scanner_inbox:
-      path: "/zpool0/shares/scanner-inbox"
-      quota: "50G"
-    iscsi:
-      path: "/zpool0/iscsi"
-      quota: "500G"
-    backups:
-      path: "/zpool0/backups"
-      quota: "2T"
+  - pool: "zpool0"
+    datasets:
+      system:
+        path: "/zpool0/system"
+        quota: "10G"
+      system_garage:
+        path: "/zpool0/system/garage"
+        quota: "50G"
+      system_garage_data:
+        path: "/zpool0/system/garage/data"
+        quota: "500G"
+      system_garage_meta:
+        path: "/zpool0/system/garage/meta"
+        quota: "10G"
+      shares:
+        path: "/zpool0/shares"
+        quota: "5T"
+      shares_media:
+        path: "/zpool0/shares/media"
+        quota: "4T"
+      shares_scanner_inbox:
+        path: "/zpool0/shares/scanner-inbox"
+        quota: "50G"
+      iscsi:
+        path: "/zpool0/iscsi"
+        quota: "500G"
+      backups:
+        path: "/zpool0/backups"
+        quota: "2T"
 
 firewall:
   default_input: "drop"

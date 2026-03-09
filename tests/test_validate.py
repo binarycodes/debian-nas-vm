@@ -251,3 +251,20 @@ class TestValidateStatic:
         config = NasConfig(**services_raw)
         errors = validate_static(config)
         assert any("NFS export path" in e and "not in storage.datasets" in e for e in errors)
+
+    def test_cross_pool_path_resolution(self, services_raw):
+        # A service configured with a path from pool2 is accepted when pool2 exists.
+        services_raw["storage"].append({
+            "pool": "tank",
+            "datasets": {"media2": {"path": "/tank/media2", "quota": "5T"}},
+        })
+        services_raw["nfs"]["exports"].append({
+            "name": "media2",
+            "path": "/tank/media2",
+            "clients": [{"cidr_ref": "nfs/media2"}],
+            "enabled": True,
+        })
+        config = NasConfig(**services_raw)
+        errors = validate_static(config)
+        nfs_errors = [e for e in errors if "media2" in e]
+        assert nfs_errors == [], f"Unexpected errors: {nfs_errors}"

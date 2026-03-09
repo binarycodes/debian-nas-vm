@@ -35,7 +35,7 @@ class StorageDataset(BaseModel):
         return v
 
 
-class StorageConfig(BaseModel):
+class PoolConfig(BaseModel):
     pool: str
     datasets: dict[str, StorageDataset]
 
@@ -542,7 +542,7 @@ class NasConfig(BaseModel):
 
     version: int
     host_ip_ref: str
-    storage: StorageConfig
+    storage: list[PoolConfig]
     firewall: FirewallConfig
     nfs: Optional[NfsConfig] = None
     samba: Optional[SambaConfig] = None
@@ -553,7 +553,7 @@ class NasConfig(BaseModel):
 
     @field_validator("version")
     @classmethod
-    def version_must_be_1(cls, v):
+    def version_must_match(cls, v):
         if v != CONFIG_VERSION:
             raise ValueError(f"version must be {CONFIG_VERSION}")
         return v
@@ -564,6 +564,19 @@ class NasConfig(BaseModel):
         if not v:
             raise ValueError("host_ip_ref must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def storage_non_empty(self):
+        if not self.storage:
+            raise ValueError("storage must contain at least one pool")
+        return self
+
+    @model_validator(mode="after")
+    def unique_pool_names(self):
+        names = [p.pool for p in self.storage]
+        if len(names) != len(set(names)):
+            raise ValueError("pool names must be unique")
+        return self
 
 
 class SecretsConfig(BaseModel):

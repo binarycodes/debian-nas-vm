@@ -6,12 +6,20 @@ export SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
 SECRETS_ENC="/var/lib/cloudyhome/nas/secrets.enc.yaml"
 SERVICES_YML="/var/lib/cloudyhome/nas/services.yml"
 RUN_DIR="/run/nas"
-POOL=$(yq -r '.storage.pool' "$SERVICES_YML")
-
-if [ -z "$POOL" ] || [ "$POOL" = "null" ]; then
-    echo "ERROR: Could not read storage.pool from $SERVICES_YML" >&2
+# Read all pool names
+mapfile -t POOLS < <(yq -r '.storage[].pool' "$SERVICES_YML")
+if [ ${#POOLS[@]} -eq 0 ]; then
+    echo "ERROR: No pools found in storage configuration" >&2
     exit 1
 fi
+
+# Validate all pool names before attempting any import
+for POOL in "${POOLS[@]}"; do
+    if [ -z "$POOL" ] || [ "$POOL" = "null" ]; then
+        echo "ERROR: Invalid pool name in storage configuration" >&2
+        exit 1
+    fi
+done
 
 cleanup() {
     if [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ]; then
@@ -45,16 +53,18 @@ if [ "$MISSING" -eq 1 ]; then
     exit 1
 fi
 
-# Import pool if needed
-if zpool list "$POOL" >/dev/null 2>&1; then
-    echo "Pool $POOL already imported"
-else
-    echo "Importing pool $POOL"
-    if ! zpool import "$POOL"; then
-        echo "ERROR: Failed to import pool $POOL. Pool not found or cannot be imported." >&2
-        exit 1
+# Import each pool
+for POOL in "${POOLS[@]}"; do
+    if zpool list "$POOL" >/dev/null 2>&1; then
+        echo "Pool $POOL already imported"
+    else
+        echo "Importing pool $POOL"
+        if ! zpool import "$POOL"; then
+            echo "ERROR: Failed to import pool $POOL. Pool not found or cannot be imported." >&2
+            exit 1
+        fi
     fi
-fi
+done
 
 # Mount all datasets — ignore "already mounted" errors from a previous run
 echo "Mounting all ZFS datasets"

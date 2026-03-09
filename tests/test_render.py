@@ -447,11 +447,11 @@ class TestZfsScrubServiceTemplate:
         config = NasConfig(**services_raw)
         ctx = build_context(config, secrets_raw)
         content = render_template("cloudyhome-zfs-scrub.service.j2", ctx, template_dir)
-        assert f"zpool scrub {config.storage.pool}" in content
+        assert f"zpool scrub {config.storage[0].pool}" in content
 
     def test_different_pool_name_substituted(self, services_raw, secrets_raw, template_dir):
-        services_raw["storage"]["pool"] = "tank"
-        for ds in services_raw["storage"]["datasets"].values():
+        services_raw["storage"][0]["pool"] = "tank"
+        for ds in services_raw["storage"][0]["datasets"].values():
             ds["path"] = ds["path"].replace("/zpool0/", "/tank/")
         config = NasConfig(**services_raw)
         ctx = build_context(config, secrets_raw)
@@ -464,6 +464,18 @@ class TestZfsScrubServiceTemplate:
         ctx = build_context(config, secrets_raw)
         content = render_template("cloudyhome-zfs-scrub.service.j2", ctx, template_dir)
         assert "After=cloudyhome-zfs-import.service" in content
+
+    def test_multi_pool_scrub(self, services_raw, secrets_raw, template_dir):
+        services_raw["storage"].append({
+            "pool": "tank",
+            "datasets": {"media": {"path": "/tank/media", "quota": "5T"}},
+        })
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("cloudyhome-zfs-scrub.service.j2", ctx, template_dir)
+        assert "zpool scrub zpool0" in content
+        assert "zpool scrub tank" in content
+        assert content.count("ExecStart=") == 2
 
 
 class TestValidateToml:

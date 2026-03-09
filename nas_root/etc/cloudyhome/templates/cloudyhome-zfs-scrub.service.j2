@@ -4,4 +4,6 @@ After=cloudyhome-zfs-import.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/zpool scrub {{ config.storage.pool }}
+{%- for pool_config in config.storage %}
+ExecStart=/usr/sbin/zpool scrub {{ pool_config.pool }}
+{%- endfor %}
