@@ -1,0 +1,34 @@
+name: validate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./tests
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: lint and test
+        run: make validate
+
+  build-deb:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: build deb
+        run: bash packaging/build.sh

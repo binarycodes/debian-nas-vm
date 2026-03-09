@@ -1,0 +1,13 @@
+[Unit]
+Description=Load nftables firewall rules
+After=cloudyhome-nas-render.service
+Requires=cloudyhome-nas-render.service
+Before=cloudyhome-nas-apply.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.conf
+
+[Install]
+WantedBy=multi-user.target

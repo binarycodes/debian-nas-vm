@@ -1,125 +1,48 @@
 # Packer Image Build Checklist
 
-Items that must be handled during Packer image build and are out of scope for the runtime boot chain. The project deliverables (scripts, units, templates, config files) are baked into the image by Packer from the source tree; this checklist covers the prerequisites and image-level configuration that the PLAN.md boot chain depends on.
+Packer has three responsibilities, in this order:
 
-**Important**: The `nas_root/` source tree contains symlinks (systemd `WantedBy` symlinks, ZEDLET symlinks) with relative or absolute targets that may not resolve on the build machine. Packer must copy the tree using a symlink-preserving method (`cp -a`, `rsync -a`, or Packer's `file` provisioner). Do **not** dereference symlinks during copy.
+1. Inject both `services.yml` and `secrets.enc.yaml` (see section 1 below). Both **must be present before the deb install**: `services.yml` because the install phase runs `nas-validate-install-phase` and pulls container images; `secrets.enc.yaml` because `make install` sets its permissions and it must exist at that point.
+2. Copy `cloudyhome-nas.deb` to the image and install it with `apt-get install -y ./cloudyhome-nas.deb`. apt satisfies `Depends:` first (all required packages), then dpkg unpacks the files, then postinst runs `make -C /var/lib/cloudyhome/installer install` — pre-pulls container images, installs the Python library, sets permissions, validates `services.yml`, enables services, and creates symlinks. `sops` and `age` are assumed to be present in the base golden image and are not installed by this step.
 
-## 1. Install packages and tools
+## 1. Inject `services.yml` and `secrets.enc.yaml` (mandatory)
 
-All packages below must be installed in the Packer image.
+The source tree contains placeholder versions of both files. They **must** be replaced with real versions before the image is usable.
 
-System packages:
+Both files must be injected **before** the deb install.
+
+**`services.yml`**:
+- **Target path**: `/var/lib/cloudyhome/nas/services.yml`
+- `make install` reads `services.yml` for two reasons:
+  1. **Image pull** — `pull-images` reads `.garage.image` and `.ftp.image` from `services.yml` to know which container images to pre-pull. A missing or placeholder file means the wrong images (or no images) get pulled.
+  2. **Install-phase validation** — `nas-validate-install-phase` validates the schema and static cross-field rules (path-to-dataset consistency, pool name alignment, etc.). A missing or placeholder `services.yml` will abort the build at this step.
+- Secret-dependent checks (host IP, disk IDs, firewall sources, CHAP, tokens) are **not** run at install time — only schema and secrets-free structural checks.
+
+**`secrets.enc.yaml`**:
+- **Target path**: `/var/lib/cloudyhome/nas/secrets.enc.yaml`
+- Encrypt with `sops --encrypt --age <pubkey> secrets.yaml > secrets.enc.yaml` before injecting.
+- Cannot be validated at build time (no AGE private key present in the image during Packer build). Full secrets validation runs at first boot via `cloudyhome-nas-validate.service`.
+- `make install` sets permissions to `0600 root:root`.
+
+Packer provisioner order:
 ```
-zfsutils-linux
-nfs-kernel-server
-samba
-targetcli-fb
-podman
-cloud-init
-nftables
-yq
-smartmontools
-msmtp
-```
+# 1. file provisioners — both before deb install
+source = "path/to/services.yml"
+destination = "/var/lib/cloudyhome/nas/services.yml"
 
-Note: `zfs-zed` is required but is typically included with `zfsutils-linux` on Debian. Verify it is present after install; if not, install explicitly.
+source = "path/to/secrets.enc.yaml"
+destination = "/var/lib/cloudyhome/nas/secrets.enc.yaml"
 
-Secrets tooling (install from upstream releases or distro packages):
-```
-sops
-age
-```
-
-Python runtime and libraries:
-```
-python3
-python3-pip
-```
-
-Python packages (via pip):
-```
-pyyaml
-pydantic
-jinja2
-tomli-w
+# 2. file + shell provisioner — copy and install the deb
+source = "cloudyhome-nas.deb"
+destination = "/tmp/cloudyhome-nas.deb"
+# then:
+apt-get install -y /tmp/cloudyhome-nas.deb
 ```
 
-## 2. Pre-pull container images
+The image will fail to boot correctly if either file is absent or contains placeholder data.
 
-Container images must be pulled into the Podman image store during Packer build so that Quadlet services can start at boot without any network dependency.
-
-Images to pre-pull:
-- `dxflrs/garage:latest` (Garage S3) — **minimum Garage v1.x required**. The bootstrap script passes `layout_capacity` as a human-readable string (e.g. `"1G"`) to `garage layout assign -c`. This format is only supported in Garage v1.x and later; older versions require capacity as an integer in bytes.
-- `delfer/alpine-ftp-server:latest` (FTP)
-
-Pull command during Packer provisioning:
-```
-podman pull dxflrs/garage:latest
-podman pull delfer/alpine-ftp-server:latest
-```
-
-The image store is persisted in the golden image. At boot, Podman finds the images locally and starts containers immediately.
-
-## 3. Mask stock ZFS services
-
-The cloudyhome boot chain manages ZFS import exclusively via `cloudyhome-zfs-import.service` (Section 6.2). Stock ZFS services must be masked to prevent conflicts:
-
-```
-systemctl mask zfs-import-cache.service zfs-import-scan.service zfs-mount.service zfs-share.service
-```
-
-## 4. Disable NFS, Samba, and iSCSI auto-start
-
-Disable the default auto-start of `nfs-server.service`, `smbd.service`, and `target.service` so they do not start before the cloudyhome boot chain has rendered and applied config:
-
-```
-systemctl disable nfs-server smbd target
-```
-
-**Note**: The runtime boot chain (`cloudyhome-nas-apply.service`) uses `reload-or-restart` (NFS, Samba) and `restart` (iSCSI) and handles both cases — services already running or stopped. This step is best-effort hygiene only; the system is correct either way.
-
-## 5. Service enabling (handled by deliverables, not Packer)
-
-Packer does **not** enable any NAS-related services. All service enabling is handled by the project deliverables source tree:
-
-- **Custom cloudyhome units** (`cloudyhome-nas-validate.service`, `cloudyhome-zfs-import.service`, `cloudyhome-nas-render.service`, `cloudyhome-nas-firewall.service`, `cloudyhome-nas-apply.service`, `cloudyhome-zfs-scrub.timer`): enabled by `WantedBy` symlinks included in the source tree (e.g. `multi-user.target.wants/cloudyhome-nas-validate.service → ../cloudyhome-nas-validate.service`). Packer copies these symlinks into place alongside the unit files — no `systemctl enable` required.
-- **Stock services** (`smartd.service`, `zfs-zed.service`): enabled by a post-install script included in the deliverables source tree, run as the final Packer provisioning step.
-- `cloudyhome-garage-bootstrap.service` is intentionally NOT enabled — it has no `WantedBy=` and is driven exclusively by the rendered `nas-apply-services.sh` script.
-
-Packer only enables generic infrastructure services (networking, SSH, NTP, etc.).
-
-## 6. ZEDLET symlinks
-
-ZEDLET symlinks are included in the `nas_root/` source tree (see PLAN.md Section 16) and copied into the image alongside all other deliverables. No manual `ln -s` commands are needed.
-
-The source tree contains symlinks with absolute targets (e.g., `statechange-nas-health-alert.sh → /usr/local/sbin/nas-zedlet-wrapper`). These targets do not resolve on the build machine — that is expected. Packer must copy the source tree with a symlink-preserving method (`cp -a`, `rsync -a`, or Packer's `file` provisioner which preserves symlinks by default). Do **not** use a copy method that follows/dereferences symlinks.
-
-The target script (`nas-zedlet-wrapper`) is placed outside `/etc/zfs/zed.d/` to avoid being executed directly by ZED as an `all-` script.
-
-## 7. Script permissions
-
-All scripts installed to `/usr/local/sbin/` must be `0755 root:root`:
-
-```
-chmod 0755 /usr/local/sbin/nas-validate-config
-chmod 0755 /usr/local/sbin/nas-zfs-import
-chmod 0755 /usr/local/sbin/nas-render-config
-chmod 0755 /usr/local/sbin/nas-apply-config
-chmod 0755 /usr/local/sbin/nas-garage-bootstrap
-chmod 0755 /usr/local/sbin/nas-health-alert
-chmod 0755 /usr/local/sbin/nas-zedlet-wrapper
-```
-
-## 8. Static config files
-
-These are baked into the image as-is (not rendered at boot):
-
-| File | Source | Notes |
-|------|--------|-------|
-| `/etc/smartd.conf` | Section 15.3 | SMART test schedule and alert exec |
-| `/etc/zfs/zed.d/zed.rc` | Section 15.4 | ZED notification settings; disables built-in email |
-
-## 9. AGE private key cloud-init permissions (mandatory)
+## 2. AGE private key cloud-init permissions (mandatory)
 
 The cloud-init `write_files` entry that delivers the AGE private key to `/etc/sops/age/keys.txt` must explicitly set:
 

@@ -1,0 +1,7 @@
+#!/bin/bash
+set -e
+case "$1" in
+  configure)
+    make -C /var/lib/cloudyhome/installer install
+    ;;
+esac

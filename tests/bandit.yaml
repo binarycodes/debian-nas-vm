@@ -1,0 +1,6 @@
+skips:
+  - B404  # subprocess import is safe when not using shell=True
+  - B603  # subprocess without shell=True is the safe pattern
+  - B607  # partial path is acceptable for well-known system tools
+  - B310  # urlopen URL is constructed from hardcoded values, not user input
+  - B701  # jinja2 autoescape=False is correct for non-HTML config file templates

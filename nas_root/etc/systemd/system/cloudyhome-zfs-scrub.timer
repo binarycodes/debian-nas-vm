@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic ZFS scrub timer
+
+[Timer]
+OnCalendar=*-*-1,15 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -266,17 +266,17 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Type: `oneshot`
 - `After=cloudyhome-zfs-import.service`
 - No `WantedBy=` — driven exclusively by the timer.
-- Runs: `zpool scrub zpool0`
+- Runs one `zpool scrub <pool>` per entry in `storage[]`; rendered from `cloudyhome-zfs-scrub.service.j2` at boot.
 - Purpose: periodic ZFS scrub to detect silent data corruption. Scrub results are reported by ZED (Section 15.4) on completion.
 
 ### 6.8 `cloudyhome-zfs-scrub.timer`
 - `OnCalendar=*-*-1,15 02:00:00` — runs at 02:00 on the 1st and 15th of each month.
 - `Persistent=true` — if the VM was off at the scheduled time, the scrub runs on next boot.
 - `WantedBy=timers.target`
-- The timer is enabled by the source tree's `WantedBy` symlink (`timers.target.wants/cloudyhome-zfs-scrub.timer`). Scrub frequency is a static image-time decision, not driven by `services.yml`.
+- The timer is enabled by `systemctl enable cloudyhome-zfs-scrub.timer` in the installer Makefile. Scrub frequency is a static image-time decision, not driven by `services.yml`.
 
 ### 6.9 `smartd.service` (stock, configured)
-- Stock `smartmontools` service, enabled by the deliverables post-install script.
+- Stock `smartmontools` service, enabled at runtime by `nas-apply-config` during the apply phase.
 - Started by the rendered `nas-apply-services.sh` script (`systemctl reload-or-restart smartd.service`) — unconditionally, on every boot.
 - Configured via static `/etc/smartd.conf` baked into the image (not rendered at boot).
 - Runs scheduled SMART self-tests: short daily at 02:00, long Saturdays at 03:00.
@@ -286,7 +286,7 @@ All outputs are generated atomically from template + decrypted secrets at boot.
 - Full config breakdown in Section 15.3.
 
 ### 6.10 `zfs-zed.service` (stock, configured)
-- Stock ZFS Event Daemon service, enabled by the deliverables post-install script.
+- Stock ZFS Event Daemon service, enabled at runtime by `nas-apply-config` during the apply phase.
 - Started by the rendered `nas-apply-services.sh` script (`systemctl reload-or-restart zfs-zed.service`) — unconditionally, on every boot.
 - Configured via static `/etc/zfs/zed.d/zed.rc` baked into the image (not rendered at boot).
 - Watches the ZFS kernel event stream and fires ZEDLETs on pool state changes, scrub results, I/O errors, and resilver completions.
@@ -328,7 +328,7 @@ Idempotency (hard requirement):
 - Samba global + shares
 - iSCSI target/LUN mapping
 - Garage network and non-secret parameters
-- FTP listeners, passive port range, and upload policy
+- FTP listener and upload policy
 - Health alert settings (SMTP host, port, TLS mode)
 
 `secrets.enc.yaml` defines sensitive values:
@@ -375,8 +375,7 @@ All ports are on the NAS VM. Actual rules are declared in `services.yml` (`firew
 | 3900          | TCP      | Garage S3       | S3 client subnet                | Garage S3-compatible object storage API             |
 | 3901          | TCP      | Garage RPC      | No rule — blocked by default-drop | Single-node: no external RPC needed; bound to host IP, no firewall rule |
 | 3903          | TCP      | Garage admin    | No rule — blocked by default-drop | Admin API bound to host IP; blocked by firewall default-drop |
-| 21            | TCP      | FTP control     | Scanner IP only                 | Pure FTP control channel for scanner uploads        |
-| 21000–21010   | TCP      | FTP passive     | Scanner IP only                 | Passive data channels; range defined in services.yml |
+| 21            | TCP      | FTP control     | Scanner IP only                 | Pure FTP control channel for scanner uploads; passive mode not used |
 
 ## 11. Operations and Lifecycle
 
@@ -395,13 +394,13 @@ Deliverable scope (this project):
 - Shell alert script (`/usr/local/sbin/nas-health-alert`) — logs to journal, sends email via msmtp when enabled; called by both smartd and ZED
 - Shell ZEDLET wrapper (`/usr/local/sbin/nas-zedlet-wrapper`) — forwards ZED environment variables and calls the alert script
 - systemd units: `cloudyhome-nas-validate.service`, `cloudyhome-zfs-import.service`, `cloudyhome-nas-render.service`, `cloudyhome-nas-firewall.service`, `cloudyhome-nas-apply.service`, `cloudyhome-garage-bootstrap.service`, `cloudyhome-zfs-scrub.service`, `cloudyhome-zfs-scrub.timer`
-- Jinja2 templates for all generated configs (NFS exports, smb.conf, iSCSI saveconfig.json, garage.toml, ftp.env, Quadlet units, alert.conf, msmtprc, nas-apply-services.sh)
-- Static config files baked into image: `/etc/smartd.conf`, `/etc/zfs/zed.d/zed.rc`, ZEDLET symlinks
+- Jinja2 templates for all generated configs (NFS exports, smb.conf, garage.toml, ftp.env, Quadlet units, alert.conf, msmtprc, nas-apply-services.sh); iSCSI saveconfig.json is generated directly in code (not a template)
+- Static config files baked into image: `/etc/smartd.conf`, `/etc/zfs/zed.d/zed.rc`
 - `services.yml` canonical example (baked into image by Packer)
 - `secrets.enc.yaml` schema example (encrypted and baked into image by Packer)
-- `PACKER_CHECKLIST.md` — mandatory Packer build steps (package installs, container image pre-pull, stock ZFS service masking, NFS/Samba/iSCSI disable, ZEDLET symlinks, script permissions, static configs, AGE key permissions)
-- All files are placed under a source tree that Packer copies into the image
-- The source tree includes `WantedBy` symlinks for all custom cloudyhome units (e.g. `multi-user.target.wants/cloudyhome-nas-validate.service`), so they are enabled by file placement when Packer copies the tree — no `systemctl enable` required. Stock services (`smartd.service`, `zfs-zed.service`) are enabled by a post-install script included in the source tree.
+- `PACKER_CHECKLIST.md` — mandatory Packer build steps (package installs, container image pre-pull, AGE key permissions)
+- All files are placed under `nas_root/` which Packer copies into the image, then runs `make -C /var/lib/cloudyhome/installer install`
+- The installer Makefile (`var/lib/cloudyhome/installer/Makefile`) handles all post-copy setup: installing the `cloudyhome` Python package, setting script permissions, `systemctl enable` for all custom units, masking/disabling stock services, and creating ZEDLET symlinks. Stock services (`smartd.service`, `zfs-zed.service`) are enabled at runtime by `nas-apply-config`.
 
 Recovery drill target:
 - Recreate VM from image + IaC.
@@ -442,15 +441,15 @@ Recovery drill target:
 - **No credential persistence to ZFS.** All credentials are reprovisioned from secrets on every boot (including reboots). Config changes mean VM replacement, so secrets in the image are always current. All apply steps must be idempotent and safe to rerun.
 
 - Container runtime is fixed: root Podman Quadlets for all containers.
-- Render/config generation language: **Python**. Strict schema validation via `pydantic`; no config is written unless all validation passes. Libraries: `pyyaml`, `pydantic`, `jinja2`, `tomli-w`.
+- Render/config generation language: **Python**. Strict schema validation via `pydantic`; no config is written unless all validation passes. Libraries: `pyyaml`, `pydantic`, `jinja2`.
 - iSCSI backend: **direct JSON generation**. The renderer builds `/etc/target/saveconfig.json` from `services.yml` + secrets. `target.service` (rtslib-fb) restores from it on boot. No `targetcli` interactive session involved.
 - **NFS and Samba run as host services** (`nfs-kernel-server`, `smbd`), not containers. NFS is a kernel subsystem; containerizing it provides no isolation benefit and adds significant complexity. Samba follows the same decision for consistency. The VM is the isolation boundary. Garage and FTP remain containerized as Podman Quadlets.
 - **NFS, Samba, and iSCSI start handling**: the rendered `nas-apply-services.sh` script uses `systemctl reload-or-restart` for `nfs-server.service` and `smbd.service`, and `systemctl restart` for `target.service`, but only when the corresponding service is present in `services.yml`. This correctly handles both cases: starts the service if stopped, reloads/restarts if already running. The apply chain does not rely on or assume any prior state of these services. The Packer image disables their auto-start as a best-effort measure, but the boot chain is correct regardless of whether they were pre-running or not. If `nfs`, `samba`, or `iscsi` is absent from `services.yml`, the corresponding `systemctl` command is not included in the rendered script and the service is never started.
 
 ### 13.2 Dataset and zvol Creation
 During `cloudyhome-nas-apply.service`:
-- **Datasets**: `storage.datasets` is a map of simple underscore-separated name to an object with `path` (mount path) and `quota` (ZFS quota) fields (e.g. `shares_media: {path: "/zpool0/shares/media", quota: "4T"}`). The ZFS dataset name in the config is the map key (e.g. `shares_media`). The apply script constructs the full ZFS name as `{storage.pool}/{key}` (e.g. `zpool0/shares_media`) and creates it via `zfs create -o mountpoint=<path> {pool}/{key}`. After creation, the quota is set via `zfs set quota=<quota> {pool}/{key}`. For existing datasets, the script reads the current quota with `zfs get -Hp -o value quota {pool}/{key}` and compares it to the configured value: if the current quota differs from the configured value (or is `none`), the script checks current usage via `zfs get -Hp -o value used {pool}/{key}`. If usage is below the configured quota, the quota is set via `zfs set quota=<quota> {pool}/{key}` (works for both increases and decreases). If usage already meets or exceeds the configured quota, the script logs an error and exits non-zero — applying the quota would make the dataset immediately full.
-- **zvols** (iSCSI LUNs): created if missing. The config path omits the pool prefix (e.g. `iscsi/vmstore`); the apply script prepends `storage.pool` to get the full ZFS name (`zpool0/iscsi/vmstore`) and runs `zfs create -V <size> {pool}/{path}`. Block device is derived as `/dev/zvol/{pool}/{path}`. Existing zvols left untouched (size is not modified).
+- **Datasets**: `storage` is a list of pool configs; the apply script iterates each entry. Within each pool, `datasets` is a map of simple underscore-separated name to an object with `path` (mount path) and `quota` (ZFS quota) fields (e.g. `shares_media: {path: "/zpool0/shares/media", quota: "4T"}`). The ZFS dataset name in the config is the map key (e.g. `shares_media`). The apply script constructs the full ZFS name as `{pool}/{key}` (e.g. `zpool0/shares_media`) and creates it via `zfs create -o mountpoint=<path> {pool}/{key}`. After creation, the quota is set via `zfs set quota=<quota> {pool}/{key}`. For existing datasets, the script reads the current quota with `zfs get -Hp -o value quota {pool}/{key}` and compares it to the configured value: if the current quota differs from the configured value (or is `none`), the script checks current usage via `zfs get -Hp -o value used {pool}/{key}`. If usage is below the configured quota, the quota is set via `zfs set quota=<quota> {pool}/{key}` (works for both increases and decreases). If usage already meets or exceeds the configured quota, the script logs an error and exits non-zero — applying the quota would make the dataset immediately full.
+- **zvols** (iSCSI LUNs): created if missing. `iscsi.dataset` holds the absolute dataset path (e.g. `/zpool0/iscsi`); `lun.path` holds only the zvol name (e.g. `vmstore`). The apply script strips the leading `/` from `iscsi.dataset` and concatenates to get the full ZFS name (e.g. `zpool0/iscsi/vmstore`) and runs `zfs create -V <size> {dataset}/{path}`. Block device is derived as `/dev/zvol/{dataset.lstrip('/')}/{path}`. Existing zvols left untouched (size is not modified).
 
 ## 14. Finalized `services.yml` Structure
 
@@ -464,13 +463,13 @@ All secret values referenced here are resolved from decrypted `secrets.enc.yaml`
 ### 14.1 Design Principles
 - `services.yml` contains only non-secret intent and topology.
 - Secrets are referenced by stable IDs/paths and resolved at render time.
-- Paths that point to storage data must be under `zpool0` mount hierarchy.
+- Paths that point to storage data must be under the mount hierarchy of their respective pool.
 - Schema is explicit and strict; unknown top-level keys should fail validation.
 
 ### 14.2 Top-Level Keys
-- `version` (required, integer): schema version. Initial value: `1`.
+- `version` (required, integer): schema version. Current value: `2`.
 - `host_ip_ref` (required, string): secret path resolving to the NAS VM's LAN IP; used as bind address for all services.
-- `storage` (required, map): pool, dataset conventions, and per-dataset quotas.
+- `storage` (required, list): one or more pool configs, each with a `pool` name and `datasets` map.
 - `firewall` (required, map): nftables rule definitions.
 - `nfs` (optional, map): NFS export definitions.
 - `samba` (optional, map): Samba global and share definitions.
@@ -484,40 +483,40 @@ All of `nfs`, `samba`, `iscsi`, `garage`, and `ftp` are optional. A config with 
 ### 14.3 Canonical Schema (Field Contract)
 
 ```yaml
-version: 1
+version: 2
 
 host_ip_ref: "host/ip"              # resolves to the NAS VM's LAN IP from secrets; used as bind address for all services
 
-storage:
-  pool: "zpool0"
-  datasets:                                                          # canonical inventory; created by cloudyhome-nas-apply.service if missing; ZFS dataset name = map key
-    system:                                                          # NAS system/state parent dataset
-      path: "/zpool0/system"
-      quota: "10G"
-    system_garage:                                                   # Garage state parent dataset
-      path: "/zpool0/system/garage"
-      quota: "50G"
-    system_garage_data:                                              # Garage data directory (bind-mounted into container)
-      path: "/zpool0/system/garage/data"
-      quota: "500G"
-    system_garage_meta:                                              # Garage metadata directory (bind-mounted into container)
-      path: "/zpool0/system/garage/meta"
-      quota: "10G"
-    shares:                                                          # file shares parent dataset
-      path: "/zpool0/shares"
-      quota: "5T"
-    shares_media:                                                    # shared media (NFS + Samba)
-      path: "/zpool0/shares/media"
-      quota: "4T"
-    shares_scanner_inbox:                                            # FTP upload root
-      path: "/zpool0/shares/scanner-inbox"
-      quota: "50G"
-    iscsi:                                                           # zvol parent dataset for iSCSI LUNs
-      path: "/zpool0/iscsi"
-      quota: "500G"
-    backups:                                                         # backup target dataset (snapshots/replication landing)
-      path: "/zpool0/backups"
-      quota: "2T"
+storage:                                                             # list of pool configs; must be non-empty; pool names must be unique
+  - pool: "zpool0"
+    datasets:                                                        # canonical inventory; created by cloudyhome-nas-apply.service if missing; ZFS dataset name = map key
+      system:                                                        # NAS system/state parent dataset
+        path: "/zpool0/system"
+        quota: "10G"
+      system_garage:                                                 # Garage state parent dataset
+        path: "/zpool0/system/garage"
+        quota: "50G"
+      system_garage_data:                                            # Garage data directory (bind-mounted into container)
+        path: "/zpool0/system/garage/data"
+        quota: "500G"
+      system_garage_meta:                                            # Garage metadata directory (bind-mounted into container)
+        path: "/zpool0/system/garage/meta"
+        quota: "10G"
+      shares:                                                        # file shares parent dataset
+        path: "/zpool0/shares"
+        quota: "5T"
+      shares_media:                                                  # shared media (NFS + Samba)
+        path: "/zpool0/shares/media"
+        quota: "4T"
+      shares_scanner_inbox:                                          # FTP upload root
+        path: "/zpool0/shares/scanner-inbox"
+        quota: "50G"
+      iscsi:                                                         # zvol parent dataset for iSCSI LUNs
+        path: "/zpool0/iscsi"
+        quota: "500G"
+      backups:                                                       # backup target dataset (snapshots/replication landing)
+        path: "/zpool0/backups"
+        quota: "2T"
 
 firewall:
   default_input: "drop"              # drop | accept
@@ -544,10 +543,6 @@ firewall:
       sources_ref: "firewall/garage-s3"
     - service: "ftp"
       ports: [21]
-      proto: ["tcp"]
-      sources_ref: "firewall/ftp"
-    - service: "ftp-passive"
-      port_range: [21000, 21010]     # inclusive range; maps to nftables tcp dport 21000-21010
       proto: ["tcp"]
       sources_ref: "firewall/ftp"
 
@@ -588,13 +583,14 @@ samba:
 iscsi:
   base_iqn: "iqn.2026-03.home.arpa:nas01"
   portal_port: 3260                    # bind IP resolved from host_ip_ref; single portal, single NIC — multipath not required for this deployment
+  dataset: "/zpool0/iscsi"             # absolute path of the parent ZFS dataset; must match a path in storage[*].datasets
   targets:
     - name: "vmstore"
       iqn_suffix: "vmstore"
       luns:
         - lun: 0
           type: "zvol"
-          path: "iscsi/vmstore"           # zvol path (no pool prefix); apply script prepends storage.pool; block device: /dev/zvol/{pool}/{path}
+          path: "vmstore"                # zvol name only (no dataset prefix); apply script combines with iscsi.dataset; block device: /dev/zvol/{dataset.lstrip('/')}/{path}
           size: "100G"                   # zvol size; created if not present, left untouched if exists
           readonly: false
       auth:
@@ -625,16 +621,13 @@ garage:
 ftp:
   # TLS is intentionally not supported. This FTP instance is for internal scanner uploads only;
   # access is restricted to the scanner IP at the firewall. Plain FTP is acceptable in this context.
+  # Passive mode is not used; only the control port (21) is needed.
   enabled: true
   runtime: "podman-quadlet-root"
   quadlet_name: "cloudyhome-ftp"
   image: "delfer/alpine-ftp-server:latest"
   config_dir: "/etc/cloudyhome/ftp"     # host directory for rendered ftp.env; mounted into container
-  # bind address resolved from top-level host_ip_ref; maps to ADDRESS env
   control_port: 21
-  passive_ports:
-    min: 21000                              # maps to MIN_PORT env
-    max: 21010                              # maps to MAX_PORT env
   users_ref: ["ftp/users/scanner1"]          # list of ref paths; each resolves to a user entry in ftp.users map in secrets; maps to USERS env
   upload_root: "/zpool0/shares/scanner-inbox"
 
@@ -655,7 +648,7 @@ health:
 **Global email domain policy**: When `health.alert.enabled=true`, every value that represents an email address anywhere in `secrets.enc.yaml` must have its domain part (everything after `@`) match one of the entries in the top-level `allowed_email_domains` list in secrets. Comparison is case-insensitive. This applies to `health.addresses.from_address`, `health.addresses.to_address`, and any other email address field. `health.smtp_auth.username` is exempt — it is an authentication credential, not an email address. Validation fails if any email address uses a domain not in the allowed list. `allowed_email_domains` must be a non-empty list of non-empty strings when `health.alert.enabled=true`; it may be absent or omitted when alerting is disabled or `health` is not configured.
 
 - `disks.ids` in secrets must be a non-empty list of non-empty strings. Empty list or absent key is a fatal error. (Runtime disk presence verification — checking that `/dev/disk/by-id/<id>` exists for each entry — is performed by `cloudyhome-zfs-import.service` (Section 6.2), not by schema validation.)
-- `version` must equal `1`.
+- `version` must equal `2`.
 - `host_ip_ref` is required and must resolve to a valid RFC1918 IP address in secrets.
 - `firewall` is required; omitting it is a validation error.
 - `firewall.default_input` must be one of `drop` or `accept`.
@@ -668,14 +661,14 @@ health:
 - `sources_ref` must resolve to a non-empty list of IPs or CIDRs in secrets (RFC1918 enforced by global IP policy). Bare IPv4 addresses without a prefix length (e.g. `"192.168.1.50"`) are accepted and treated as `/32`; the renderer must emit them with an explicit `/32` suffix in the nftables rule.
 - A rule may not define both `ports` and `port_range`.
 - **Firewall rules are literal**: the renderer emits nftables rules exactly as declared — no merging, deduplication, or cross-validation against service config ports. It is the operator's responsibility to keep firewall rules consistent with service ports. Port overlaps between rules (same port, same protocol) are not rejected; they produce separate nftables rules as written.
-- `storage.pool` must be `zpool0` for this deployment.
-- `storage.datasets` must be a non-empty map with unique keys and unique `path` values.
+- `storage` must be a non-empty list; pool names across all entries must be unique.
+- Each pool entry's `pool` field is a required non-empty string. All `datasets[*].path` values within that entry must start with `/{pool}/` — the model validates this consistency per pool. The pool name drives ZFS dataset construction throughout the apply and scrub scripts.
+- `storage[*].datasets` must be a non-empty map with unique keys and unique `path` values within that pool.
 - Each key must be a non-empty underscore-separated identifier (simple name, e.g. `shares_media`).
 - Each value must be a map with required keys `path` and `quota`.
-- `path` must be an absolute mount path starting with `/zpool0/`. The ZFS dataset name is the map key (e.g. `shares_media`); the apply script constructs the full ZFS name as `{storage.pool}/{key}` for ZFS commands.
+- `path` must be an absolute mount path under the pool's root (e.g. `/zpool0/...`). The ZFS dataset name is the map key; the apply script constructs the full ZFS name as `{pool}/{key}` for ZFS commands.
 - `quota` must be a valid ZFS size string (integer followed by a unit suffix: `K`, `M`, `G`, or `T`, e.g. `"500G"`, `"2T"`).
-- Any `path` intended for data export must start with `/zpool0/`.
-- **Path-to-dataset cross-validation**: every service data path must match a `path` value in `storage.datasets` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`. For iSCSI zvol paths (`iscsi.targets[*].luns[*].path`), the parent dataset key is derived by stripping the last component (e.g., zvol path `iscsi/vmstore` → parent key `iscsi`), which must exist as a key in `storage.datasets`. Unmatched paths fail validation.
+- **Path-to-dataset cross-validation**: every service data path must match a `path` value across all pools in `storage` so the apply service auto-creates it. Checked paths: `nfs.exports[*].path`, `samba.shares[*].path`, `garage.data_dir`, `garage.metadata_dir`, `ftp.upload_root`, `iscsi.dataset`. Unmatched paths fail validation.
 - `nfs.version` must be `4`. NFSv3 is not supported in this deployment; any other value fails validation. This check is enforced in `cloudyhome-nas-validate.service` before the boot chain proceeds.
 - `nfs.exports` must be a non-empty list when `nfs` is present.
 - `nfs.exports[*].name` must be unique.
@@ -715,7 +708,8 @@ health:
 - If `session_auth=chap`, `chap_secret_ref` is required and must resolve to a map with two non-empty string fields: `chap_user` and `chap_password`.
 - `iscsi.targets[*].luns[*].type` must be `"zvol"`. No other LUN types are supported in this deployment.
 - `iscsi.targets[*].luns[*].size` is required for `type=zvol` and must be a valid ZFS size string (e.g. `"100G"`).
-- `iscsi.targets[*].luns[*].path` omits the pool prefix (e.g. `iscsi/vmstore`); the apply script prepends `storage.pool` for both `zfs create -V` and `/dev/zvol/` derivation (block device: `/dev/zvol/{pool}/{path}`).
+- `iscsi.dataset` is required when `iscsi` is present; must be an absolute path (e.g. `/zpool0/iscsi`) and must match a path in `storage[*].datasets`. Cross-validated in `validate_all`.
+- `iscsi.targets[*].luns[*].path` is the zvol name only (e.g. `vmstore`); the apply script combines `iscsi.dataset.lstrip('/')` with `lun.path` for both `zfs create -V` and `/dev/zvol/` derivation (block device: `/dev/zvol/{dataset.lstrip('/')}/{path}`).
 - `garage.enabled=true` requires:
   - `runtime=podman-quadlet-root`
   - non-empty `quadlet_name`
@@ -736,8 +730,7 @@ health:
   - `config_dir` must be a non-empty absolute path; the renderer writes `ftp.env` into this directory and the Quadlet mounts it into the container
   - non-empty `image` (FTP container image is `delfer/alpine-ftp-server`; version pinning is managed in the Quadlet file, not validated here)
   - `control_port` must be `21`. Hardware scanners expect the standard FTP control port; non-standard values are not supported in this deployment.
-  - valid passive range (`passive_ports.min <= passive_ports.max`)
-  - `upload_root` under `/zpool0/`
+  - `upload_root` must be an absolute path matching a dataset path in `storage`
   - `users_ref` must be a non-empty list of ref path strings
 - `ftp.users` in secrets must be a non-empty map with unique keys (each key is a username).
 - Each `ftp.users_ref` path must resolve to an entry in the `ftp.users` map in secrets (e.g., `"ftp/users/scanner1"` resolves to the `scanner1` key). Unresolvable paths fail closed.
@@ -888,7 +881,7 @@ ZED_PUSHBULLET_ACCESS_TOKEN=""
 ZED_NTFY_URL=""
 ```
 
-**Custom ZEDLET**: a minimal wrapper script baked into the image that calls `/usr/local/sbin/nas-health-alert`, inheriting the ZED environment variables (`ZEVENT_CLASS`, `ZEVENT_POOL`, `ZEVENT_VDEV_STATE`, etc.) so the alert script can read them directly. ZED matches scripts by filename prefix to event subclass, so one symlink per event class is installed in `/etc/zfs/zed.d/`, all pointing to the same script:
+**Custom ZEDLET**: a minimal wrapper script baked into the image that calls `/usr/local/sbin/nas-health-alert`, inheriting the ZED environment variables (`ZEVENT_CLASS`, `ZEVENT_POOL`, `ZEVENT_VDEV_STATE`, etc.) so the alert script can read them directly. ZED matches scripts by filename prefix to event subclass, so one symlink per event class is created in `/etc/zfs/zed.d/` by the installer Makefile, all pointing to the same script:
   - `statechange-nas-health-alert.sh`
   - `scrub_finish-nas-health-alert.sh`
   - `io-nas-health-alert.sh`
@@ -896,7 +889,7 @@ ZED_NTFY_URL=""
 
 The target script is placed at `/usr/local/sbin/nas-zedlet-wrapper` (outside `/etc/zfs/zed.d/` to avoid being executed directly by ZED as an `all-` script).
 
-`zfs-zed.service` is enabled by the deliverables post-install script and started by the rendered `nas-apply-services.sh` script on every boot (Section 6.10).
+`zfs-zed.service` is enabled at runtime by `nas-apply-config` and started by the rendered `nas-apply-services.sh` script on every boot (Section 6.10).
 
 ### 15.5 Alert Delivery
 
@@ -976,13 +969,13 @@ The `health` schema, validation rules, and secrets are defined in the canonical 
 Added to `PACKER_CHECKLIST.md` scope:
 
 - **Packages**: `smartmontools`, `zfs-zed` (if not already pulled in by `zfsutils-linux`), `msmtp` (lightweight SMTP client).
-- **Baked files**:
+- **Baked files** (all under `nas_root/`, copied by Packer):
   - `/etc/smartd.conf` — static config per Section 15.3.
   - `/etc/zfs/zed.d/zed.rc` — static config per Section 15.4.
-  - `/usr/local/sbin/nas-zedlet-wrapper` — ZEDLET wrapper script; symlinked into `/etc/zfs/zed.d/` per event class (`statechange-`, `scrub_finish-`, `io-`, `resilver_finish-`).
+  - `/usr/local/sbin/nas-zedlet-wrapper` — ZEDLET wrapper script.
   - `/usr/local/sbin/nas-health-alert` — alert delivery script.
   - `cloudyhome-zfs-scrub.service` and `cloudyhome-zfs-scrub.timer` — installed to `/etc/systemd/system/`.
-- **Service enabling**: handled by the deliverables source tree (Section 11), not by Packer base provisioning. Custom units are enabled via `WantedBy` symlinks in the source tree; stock services (`smartd.service`, `zfs-zed.service`) are enabled by the post-install script.
+- **Post-copy setup**: handled entirely by `make -C /var/lib/cloudyhome/installer install`. This installs the `cloudyhome` Python package, sets script permissions, runs `systemctl enable` for all custom units (including the scrub timer), masks/disables stock services, and creates ZEDLET symlinks in `/etc/zfs/zed.d/`. Stock services (`smartd.service`, `zfs-zed.service`) are enabled at runtime by `nas-apply-config`.
 - **Templates**: Jinja2 templates for `alert.conf` and `msmtprc` added to the render script's template set.
 
 ### 15.9 Open Decisions
@@ -997,12 +990,21 @@ Added to `PACKER_CHECKLIST.md` scope:
 
 ## 16. Source Tree Layout
 
-The project deliverables live under `nas_root/`. The tree mirrors the target filesystem so Packer can copy it directly into the image. A separate `scripts/` directory holds build-time helpers that are not copied to the image.
+The project deliverables live under `nas_root/`. The tree mirrors the target filesystem so Packer can copy it directly into the image. After copying, Packer runs `make -C /var/lib/cloudyhome/installer install` — that single step handles all post-copy setup.
 
 ```
 nas_root/
 ├── usr/
 │   └── local/
+│       ├── lib/
+│       │   └── cloudyhome/                  # Python package (installed by make install)
+│       │       ├── pyproject.toml
+│       │       └── cloudyhome/
+│       │           ├── __init__.py
+│       │           ├── models.py
+│       │           ├── render.py
+│       │           ├── secrets.py
+│       │           └── validate.py
 │       └── sbin/
 │           ├── nas-validate-config          # Python — schema validation
 │           ├── nas-zfs-import               # Shell — disk check + pool import
@@ -1021,29 +1023,16 @@ nas_root/
 │   │       ├── cloudyhome-nas-apply.service
 │   │       ├── cloudyhome-garage-bootstrap.service
 │   │       ├── cloudyhome-zfs-scrub.service
-│   │       ├── cloudyhome-zfs-scrub.timer
-│   │       ├── multi-user.target.wants/
-│   │       │   ├── cloudyhome-nas-validate.service → ../cloudyhome-nas-validate.service
-│   │       │   ├── cloudyhome-zfs-import.service → ../cloudyhome-zfs-import.service
-│   │       │   ├── cloudyhome-nas-render.service → ../cloudyhome-nas-render.service
-│   │       │   ├── cloudyhome-nas-firewall.service → ../cloudyhome-nas-firewall.service
-│   │       │   └── cloudyhome-nas-apply.service → ../cloudyhome-nas-apply.service
-│   │       └── timers.target.wants/
-│   │           └── cloudyhome-zfs-scrub.timer → ../cloudyhome-zfs-scrub.timer
+│   │       └── cloudyhome-zfs-scrub.timer
 │   ├── smartd.conf                          # static — SMART test schedule (Section 15.3)
 │   ├── zfs/
 │   │   └── zed.d/
-│   │       ├── zed.rc                       # static — ZED config (Section 15.4)
-│   │       ├── statechange-nas-health-alert.sh → /usr/local/sbin/nas-zedlet-wrapper
-│   │       ├── scrub_finish-nas-health-alert.sh → /usr/local/sbin/nas-zedlet-wrapper
-│   │       ├── io-nas-health-alert.sh → /usr/local/sbin/nas-zedlet-wrapper
-│   │       └── resilver_finish-nas-health-alert.sh → /usr/local/sbin/nas-zedlet-wrapper
+│   │       └── zed.rc                       # static — ZED config (Section 15.4)
 │   └── cloudyhome/
 │       └── templates/                       # Jinja2 templates for rendered configs
 │           ├── nftables.conf.j2
 │           ├── exports.j2
 │           ├── smb.conf.j2
-│           ├── saveconfig.json.j2
 │           ├── garage.toml.j2
 │           ├── ftp.env.j2
 │           ├── cloudyhome-garage.container.j2
@@ -1054,17 +1043,16 @@ nas_root/
 └── var/
     └── lib/
         └── cloudyhome/
+            ├── installer/
+            │   └── Makefile                 # make install: pip, chmod, systemctl enable, symlinks
             └── nas/
                 ├── services.yml             # canonical config (real values at deploy time)
                 └── secrets.enc.yaml         # SOPS-encrypted secrets
-
-scripts/
-└── enable-stock-services.sh                 # Packer provisioning step: systemctl enable smartd zfs-zed
 ```
 
 Notes:
-- `multi-user.target.wants/` symlinks enable custom cloudyhome units by file placement — no `systemctl enable` required during Packer build.
-- `cloudyhome-garage-bootstrap.service` is intentionally **not** symlinked — it has no `WantedBy=` and is triggered exclusively by the rendered `nas-apply-services.sh`.
-- ZEDLET symlinks use absolute targets (`/usr/local/sbin/nas-zedlet-wrapper`) because ZED resolves symlinks in `/etc/zfs/zed.d/` at runtime. The wrapper lives outside `zed.d/` to avoid being executed directly as an `all-` script.
-- `scripts/enable-stock-services.sh` is run by Packer as a provisioning step and is **not** copied into the image.
-- All scripts under `usr/local/sbin/` are `0755 root:root` (enforced by Packer — see `PACKER_CHECKLIST.md` Section 7).
+- No symlinks live in the source tree. The installer Makefile creates them all: `systemctl enable` for custom cloudyhome units, `ln -sf` for ZEDLET handlers in `/etc/zfs/zed.d/`.
+- `cloudyhome-garage-bootstrap.service` is intentionally not enabled — it has no `WantedBy=` and is triggered exclusively by the rendered `nas-apply-services.sh`.
+- ZEDLET symlinks use absolute targets (`/usr/local/sbin/nas-zedlet-wrapper`). The wrapper lives outside `zed.d/` to avoid being executed directly by ZED as an `all-` script.
+- All scripts under `usr/local/sbin/` are set to `0755 root:root` by the installer Makefile.
+- The `cloudyhome` Python package is installed system-wide via `pip install --break-system-packages` by the installer Makefile. Dependencies (`pydantic`, `pyyaml`, `jinja2`) are declared in `pyproject.toml` and installed automatically.

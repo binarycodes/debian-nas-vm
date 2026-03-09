@@ -1,0 +1,15 @@
+[Unit]
+Description=Garage S3-compatible object storage
+After=network-online.target
+Requires=network-online.target
+
+[Container]
+ContainerName={{ config.garage.quadlet_name }}
+Image={{ config.garage.image }}
+Volume={{ config.garage.config_dir }}:/etc/garage:ro
+Volume={{ config.garage.data_dir }}:{{ config.garage.data_dir }}
+Volume={{ config.garage.metadata_dir }}:{{ config.garage.metadata_dir }}
+Network=host
+
+[Install]
+WantedBy=default.target

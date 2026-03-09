@@ -1,0 +1,14 @@
+[Unit]
+Description=FTP server for scanner uploads
+After=network-online.target
+Requires=network-online.target
+
+[Container]
+ContainerName={{ config.ftp.quadlet_name }}
+Image={{ config.ftp.image }}
+EnvironmentFile={{ config.ftp.config_dir }}/ftp.env
+PublishPort={{ host_ip }}:{{ config.ftp.control_port }}:21
+Volume={{ config.ftp.upload_root }}:/home/ftp
+
+[Install]
+WantedBy=default.target

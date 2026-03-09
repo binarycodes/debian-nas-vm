@@ -1,0 +1,14 @@
+[Unit]
+Description=Import ZFS pool and mount datasets
+After=sysinit.target cloudyhome-nas-validate.service
+Requires=cloudyhome-nas-validate.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=nas
+Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
+ExecStart=/usr/local/sbin/nas-zfs-import
+
+[Install]
+WantedBy=multi-user.target

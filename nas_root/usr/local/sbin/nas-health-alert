@@ -1,0 +1,85 @@
+#!/bin/bash
+set -euo pipefail
+
+ALERT_CONF="/etc/cloudyhome/health/alert.conf"
+HOSTNAME=$(hostname)
+TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+# Source alert config
+ALERT_ENABLED=false
+ALERT_TO=""
+ALERT_FROM=""
+if [ -f "$ALERT_CONF" ]; then
+    # shellcheck source=/dev/null
+    . "$ALERT_CONF"
+fi
+
+# Determine source and severity
+SOURCE=""
+SEVERITY=""
+DETAILS=""
+
+if [ -n "${SMARTD_DEVICE:-}" ]; then
+    SOURCE="smartd"
+    case "${SMARTD_FAILTYPE:-}" in
+        EmailTest) SEVERITY="info" ;;
+        Health)    SEVERITY="critical" ;;
+        *)         SEVERITY="warning" ;;
+    esac
+    DETAILS="Device: ${SMARTD_DEVICE}, Type: ${SMARTD_FAILTYPE:-unknown}, Message: ${SMARTD_MESSAGE:-none}"
+elif [ -n "${ZEVENT_CLASS:-}" ]; then
+    SOURCE="zed"
+    case "${ZEVENT_SUBCLASS:-}" in
+        statechange)
+            case "${ZEVENT_VDEV_STATE_STR:-}" in
+                DEGRADED|FAULTED) SEVERITY="critical" ;;
+                *)                SEVERITY="warning" ;;
+            esac
+            ;;
+        io_error)       SEVERITY="warning" ;;
+        scrub_finish)
+            if [ "${ZEVENT_POOL_SCAN_ERRORS:-0}" -gt 0 ]; then
+                SEVERITY="warning"
+            else
+                SEVERITY="info"
+            fi
+            ;;
+        resilver_finish) SEVERITY="info" ;;
+        *)               SEVERITY="warning" ;;
+    esac
+    DETAILS="Pool: ${ZEVENT_POOL:-unknown}, Class: ${ZEVENT_CLASS:-unknown}, Subclass: ${ZEVENT_SUBCLASS:-unknown}"
+else
+    SOURCE="unknown"
+    SEVERITY="warning"
+    DETAILS="Unknown caller"
+fi
+
+case "$SEVERITY" in
+    critical) PRIORITY="crit" ;;
+    warning)  PRIORITY="warning" ;;
+    info)     PRIORITY="info" ;;
+    *)        PRIORITY="notice" ;;
+esac
+
+MESSAGE="[$SEVERITY] $HOSTNAME: $SOURCE - $DETAILS"
+
+# Always log to journal
+logger -t nas-health-alert -p "$PRIORITY" "$MESSAGE"
+
+# Send email if enabled
+if [ "$ALERT_ENABLED" = "true" ] && [ -n "$ALERT_TO" ]; then
+    SUBJECT="[$SEVERITY] $HOSTNAME: $SOURCE alert"
+    {
+        echo "From: $ALERT_FROM"
+        echo "To: $ALERT_TO"
+        echo "Subject: $SUBJECT"
+        echo "Date: $TIMESTAMP"
+        echo ""
+        echo "Timestamp: $TIMESTAMP"
+        echo "Host: $HOSTNAME"
+        echo "Source: $SOURCE"
+        echo "Severity: $SEVERITY"
+        echo "Details: $DETAILS"
+    } | timeout 30 msmtp -f "$ALERT_FROM" "$ALERT_TO" \
+        || logger -t nas-health-alert -p warning "Email delivery failed"
+fi

@@ -1,0 +1,79 @@
+#!/bin/bash
+set -euo pipefail
+
+export SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
+
+SECRETS_ENC="/var/lib/cloudyhome/nas/secrets.enc.yaml"
+SERVICES_YML="/var/lib/cloudyhome/nas/services.yml"
+RUN_DIR="/run/nas"
+# Read all pool names
+mapfile -t POOLS < <(yq -r '.storage[].pool' "$SERVICES_YML")
+if [ ${#POOLS[@]} -eq 0 ]; then
+    echo "ERROR: No pools found in storage configuration" >&2
+    exit 1
+fi
+
+# Validate all pool names before attempting any import
+for POOL in "${POOLS[@]}"; do
+    if [ -z "$POOL" ] || [ "$POOL" = "null" ]; then
+        echo "ERROR: Invalid pool name in storage configuration" >&2
+        exit 1
+    fi
+done
+
+cleanup() {
+    if [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ]; then
+        rm -f "$TMP_FILE"
+    fi
+}
+trap cleanup EXIT
+
+# Decrypt secrets
+mkdir -p "$RUN_DIR"
+TMP_FILE=$(mktemp "$RUN_DIR/secrets.XXXXXX.yaml")
+sops -d --output "$TMP_FILE" "$SECRETS_ENC"
+
+# Check disk presence
+DISK_IDS=$(yq -r '.disks.ids[]' "$TMP_FILE")
+if [ -z "$DISK_IDS" ]; then
+    echo "ERROR: No disk IDs found in secrets (disks.ids is empty or missing)" >&2
+    exit 1
+fi
+
+MISSING=0
+for id in $DISK_IDS; do
+    if [ ! -e "/dev/disk/by-id/$id" ]; then
+        echo "ERROR: Disk not found: /dev/disk/by-id/$id" >&2
+        MISSING=1
+    fi
+done
+
+if [ "$MISSING" -eq 1 ]; then
+    echo "ERROR: One or more disks are missing. Aborting ZFS import." >&2
+    exit 1
+fi
+
+# Import each pool
+for POOL in "${POOLS[@]}"; do
+    if zpool list "$POOL" >/dev/null 2>&1; then
+        echo "Pool $POOL already imported"
+    else
+        echo "Importing pool $POOL"
+        if ! zpool import "$POOL"; then
+            echo "ERROR: Failed to import pool $POOL. Pool not found or cannot be imported." >&2
+            exit 1
+        fi
+    fi
+done
+
+# Mount all datasets — ignore "already mounted" errors from a previous run
+echo "Mounting all ZFS datasets"
+if ! zfs mount -a 2>/tmp/zfs_mount_err; then
+    if grep -qv "already mounted" /tmp/zfs_mount_err; then
+        echo "ERROR: ZFS mount failed:" >&2
+        cat /tmp/zfs_mount_err >&2
+        exit 1
+    fi
+fi
+
+echo "ZFS import completed successfully"

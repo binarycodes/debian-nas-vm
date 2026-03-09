@@ -1,0 +1,14 @@
+[Unit]
+Description=Render NAS configuration templates
+After=cloudyhome-nas-validate.service cloudyhome-zfs-import.service
+Requires=cloudyhome-nas-validate.service cloudyhome-zfs-import.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=nas
+Environment=SOPS_AGE_KEY_FILE=/etc/sops/age/keys.txt
+ExecStart=/usr/local/sbin/nas-render-config
+
+[Install]
+WantedBy=multi-user.target
