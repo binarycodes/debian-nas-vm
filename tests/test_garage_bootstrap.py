@@ -71,9 +71,6 @@ class TestRunPodmanExec:
 
 
 class TestBootstrapConstants:
-    def test_max_attempts(self):
-        assert bootstrap_mod.GARAGE_MAX_ATTEMPTS == 30
-
     def test_poll_interval(self):
         assert bootstrap_mod.GARAGE_POLL_INTERVAL == 1
 

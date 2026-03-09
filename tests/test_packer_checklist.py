@@ -27,7 +27,6 @@ class TestSourceTreeCompleteness:
         "etc/systemd/system/cloudyhome-nas-firewall.service",
         "etc/systemd/system/cloudyhome-nas-apply.service",
         "etc/systemd/system/cloudyhome-garage-bootstrap.service",
-        "etc/systemd/system/cloudyhome-zfs-scrub.service",
         "etc/systemd/system/cloudyhome-zfs-scrub.timer",
     ]
 
@@ -42,6 +41,7 @@ class TestSourceTreeCompleteness:
         "etc/cloudyhome/templates/alert.conf.j2",
         "etc/cloudyhome/templates/msmtprc.j2",
         "etc/cloudyhome/templates/nas-apply-services.sh.j2",
+        "etc/cloudyhome/templates/cloudyhome-zfs-scrub.service.j2",
     ]
 
     EXPECTED_STATIC = [
@@ -128,14 +128,14 @@ class TestZedletSymlinks:
 
 
 class TestStockServicesEnabledByApply:
-    """Stock services (smartd, zfs-zed) are enabled at runtime by nas-apply-config, not Packer."""
+    """Stock services (smartd, zfs-zed) are enabled at runtime by nas-apply-services, not Packer."""
 
     def test_apply_enables_smartd(self):
-        path = os.path.join(NAS_ROOT, "usr", "local", "sbin", "nas-apply-config")
+        path = os.path.join(NAS_ROOT, "etc", "cloudyhome", "templates", "nas-apply-services.sh.j2")
         content = open(path).read()
         assert "smartd.service" in content
 
     def test_apply_enables_zfs_zed(self):
-        path = os.path.join(NAS_ROOT, "usr", "local", "sbin", "nas-apply-config")
+        path = os.path.join(NAS_ROOT, "etc", "cloudyhome", "templates", "nas-apply-services.sh.j2")
         content = open(path).read()
         assert "zfs-zed.service" in content

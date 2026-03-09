@@ -86,6 +86,13 @@ def create_datasets(config):
                     )
             log.info("Setting quota %s on %s", target_quota, full_name)
             run_cmd(["zfs", "set", f"quota={target_quota}", full_name])
+            actual_raw = zfs_get("quota", full_name)
+            actual_bytes = 0 if actual_raw in ("none", "0") else int(actual_raw)
+            if actual_bytes != target_bytes:
+                raise RuntimeError(
+                    f"Quota verification failed on {full_name}: "
+                    f"set {target_quota} but read back {actual_raw}"
+                )
 
 
 def create_zvols(config):
@@ -142,23 +149,16 @@ def main():
             raw = yaml.safe_load(f)
         config = NasConfig(**raw)
 
-        # Step 1: daemon-reload and enable stock services
-        log.info("Running systemctl daemon-reload")
-        run_cmd(["systemctl", "daemon-reload"])
-        log.info("Enabling stock health monitoring services")
-        run_cmd(["systemctl", "enable", "smartd.service"])
-        run_cmd(["systemctl", "enable", "zfs-zed.service"])
-
-        # Step 2: Create datasets and zvols
+        # Step 1: Create datasets and zvols
         log.info("Creating datasets and zvols")
         create_datasets(config)
         create_zvols(config)
 
         with secrets_context() as secrets:
-            # Step 3-4: Samba users
+            # Step 2: Samba users
             provision_samba_users(config, secrets)
 
-        # Step 5: Run apply-services script
+        # Step 3: Run apply-services script
         log.info("Running nas-apply-services.sh")
         run_cmd([APPLY_SERVICES_SCRIPT])
 

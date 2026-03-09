@@ -6,6 +6,7 @@ import pytest
 
 # Import from the apply script (no .py extension, so we use SourceFileLoader directly)
 APPLY_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "sbin", "nas-apply-config")
+APPLY_SERVICES_TEMPLATE = os.path.join(os.path.dirname(__file__), "..", "nas_root", "etc", "cloudyhome", "templates", "nas-apply-services.sh.j2")
 
 import importlib.util
 from importlib.machinery import SourceFileLoader
@@ -37,13 +38,15 @@ class TestApplyStructure:
         assert "fcntl.flock" in content
         assert "LOCK_EX" in content
 
-    def test_daemon_reload_first(self):
-        content = open(APPLY_SCRIPT).read()
-        # Within main(), daemon-reload should appear before create_datasets call
-        main_body = content[content.index("def main()"):]
-        reload_pos = main_body.index("daemon-reload")
-        dataset_pos = main_body.index("create_datasets")
-        assert reload_pos < dataset_pos
+    def test_daemon_reload_in_shell_script(self):
+        content = open(APPLY_SERVICES_TEMPLATE).read()
+        assert "daemon-reload" in content
+
+    def test_daemon_reload_before_enable_in_shell_script(self):
+        content = open(APPLY_SERVICES_TEMPLATE).read()
+        reload_pos = content.index("daemon-reload")
+        enable_pos = content.index("systemctl enable")
+        assert reload_pos < enable_pos
 
     def test_datasets_before_zvols(self):
         content = open(APPLY_SCRIPT).read()
@@ -63,17 +66,15 @@ class TestApplyStructure:
         assert "APPLY_SERVICES_SCRIPT" in content
 
     def test_enables_stock_services(self):
-        content = open(APPLY_SCRIPT).read()
-        main_body = content[content.index("def main()"):]
-        assert '"enable", "smartd.service"' in main_body
-        assert '"enable", "zfs-zed.service"' in main_body
+        content = open(APPLY_SERVICES_TEMPLATE).read()
+        assert "enable smartd.service" in content
+        assert "enable zfs-zed.service" in content
 
-    def test_stock_enable_before_datasets(self):
-        content = open(APPLY_SCRIPT).read()
-        main_body = content[content.index("def main()"):]
-        enable_pos = main_body.index("smartd.service")
-        dataset_pos = main_body.index("create_datasets")
-        assert enable_pos < dataset_pos
+    def test_stock_enable_before_reload_or_restart(self):
+        content = open(APPLY_SERVICES_TEMPLATE).read()
+        enable_pos = content.index("enable smartd.service")
+        restart_pos = content.index("reload-or-restart smartd.service")
+        assert enable_pos < restart_pos
 
 
 # ---------------------------------------------------------------------------
@@ -182,13 +183,32 @@ class TestCreateDatasets:
 
     def test_sets_quota_when_unset(self, config, monkeypatch):
         calls = []
+        target_bytes = str(10 * 1024**3)
+        quota_reads = []
+
+        def mock_zfs_get(prop, name):
+            if prop == "quota":
+                quota_reads.append(1)
+                # First read: unset; subsequent reads (verification): target applied
+                return "0" if len(quota_reads) == 1 else target_bytes
+            return "0"  # used
+
         monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
-        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: "0")
+        monkeypatch.setattr(apply_mod, "zfs_get", mock_zfs_get)
         monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
 
         apply_mod.create_datasets(config)
 
         assert any("quota=10G" in arg for cmd in calls for arg in cmd)
+
+    def test_raises_when_quota_verification_fails(self, config, monkeypatch):
+        # Simulate zfs set succeeding but read-back returning wrong value
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: "0")
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: None)
+
+        with pytest.raises(RuntimeError, match="Quota verification failed"):
+            apply_mod.create_datasets(config)
 
     def test_skips_quota_when_already_correct(self, config, monkeypatch):
         calls = []

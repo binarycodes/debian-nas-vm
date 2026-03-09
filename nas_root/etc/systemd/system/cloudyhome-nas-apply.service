@@ -2,6 +2,7 @@
 Description=Apply NAS configuration (datasets, users, services)
 After=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service
 Requires=cloudyhome-nas-render.service cloudyhome-nas-firewall.service cloudyhome-zfs-import.service
+Wants=cloudyhome-nas-ready.target
 
 [Service]
 Type=oneshot

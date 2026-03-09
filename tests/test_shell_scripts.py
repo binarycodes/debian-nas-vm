@@ -99,6 +99,25 @@ class TestZfsImportScript:
         exit_pos = content.index("exit 1", failed_pos)
         assert exit_pos > failed_pos
 
+    def test_validates_pool_name_not_null(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert 'Could not read storage.pool' in content
+        # validation must happen before zpool import
+        pool_check_pos = content.index("Could not read storage.pool")
+        import_pos = content.index("zpool import")
+        assert pool_check_pos < import_pos
+
+    def test_validates_disk_ids_not_empty(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "No disk IDs found in secrets" in content
+
+    def test_zfs_mount_tolerates_already_mounted(self):
+        path = os.path.join(SBIN_DIR, "nas-zfs-import")
+        content = open(path).read()
+        assert "already mounted" in content
+
 
 class TestHealthAlertScript:
     def test_set_euo_pipefail(self):

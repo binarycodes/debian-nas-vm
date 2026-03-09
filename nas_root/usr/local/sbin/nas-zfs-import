@@ -8,6 +8,11 @@ SERVICES_YML="/var/lib/cloudyhome/nas/services.yml"
 RUN_DIR="/run/nas"
 POOL=$(yq -r '.storage.pool' "$SERVICES_YML")
 
+if [ -z "$POOL" ] || [ "$POOL" = "null" ]; then
+    echo "ERROR: Could not read storage.pool from $SERVICES_YML" >&2
+    exit 1
+fi
+
 cleanup() {
     if [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ]; then
         rm -f "$TMP_FILE"
@@ -22,6 +27,11 @@ sops -d --output "$TMP_FILE" "$SECRETS_ENC"
 
 # Check disk presence
 DISK_IDS=$(yq -r '.disks.ids[]' "$TMP_FILE")
+if [ -z "$DISK_IDS" ]; then
+    echo "ERROR: No disk IDs found in secrets (disks.ids is empty or missing)" >&2
+    exit 1
+fi
+
 MISSING=0
 for id in $DISK_IDS; do
     if [ ! -e "/dev/disk/by-id/$id" ]; then
@@ -46,8 +56,14 @@ else
     fi
 fi
 
-# Mount all datasets
+# Mount all datasets — ignore "already mounted" errors from a previous run
 echo "Mounting all ZFS datasets"
-zfs mount -a
+if ! zfs mount -a 2>/tmp/zfs_mount_err; then
+    if grep -qv "already mounted" /tmp/zfs_mount_err; then
+        echo "ERROR: ZFS mount failed:" >&2
+        cat /tmp/zfs_mount_err >&2
+        exit 1
+    fi
+fi
 
 echo "ZFS import completed successfully"

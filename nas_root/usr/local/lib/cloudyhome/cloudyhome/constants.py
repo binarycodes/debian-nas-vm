@@ -50,6 +50,10 @@ APPLY_LOCK  = "/run/nas/apply.lock"
 # --- Templates ---
 TEMPLATE_DIR = "/etc/cloudyhome/templates"
 
+# --- Systemd / quadlet directories ---
+SYSTEMD_UNIT_DIR = "/etc/systemd/system"
+QUADLET_DIR      = "/etc/containers/systemd"
+
 # --- Rendered output paths ---
 NFTABLES_CONF        = "/etc/nftables.conf"
 NFS_EXPORTS          = "/etc/exports.d/cloudyhome.exports"
@@ -60,6 +64,7 @@ FTP_CONTAINER        = "/etc/containers/systemd/cloudyhome-ftp.container"
 ALERT_CONF           = "/etc/cloudyhome/health/alert.conf"
 MSMTPRC              = "/etc/msmtprc"
 APPLY_SERVICES_SCRIPT = "/etc/cloudyhome/nas-apply-services.sh"
+ZFS_SCRUB_SERVICE     = "/etc/systemd/system/cloudyhome-zfs-scrub.service"
 
 # --- ZFS dataset defaults ---
 ZFS_DATASET_COMPRESSION    = "lz4"
@@ -69,5 +74,6 @@ ZFS_DATASET_SYNC           = "standard"
 ZFS_DATASET_CASESENSITIVITY = "sensitive"
 
 # --- Garage bootstrap tuning ---
-GARAGE_MAX_ATTEMPTS  = 30
-GARAGE_POLL_INTERVAL = 1
+GARAGE_MAX_ATTEMPTS       = 30
+GARAGE_POLL_INTERVAL      = 1
+GARAGE_BOOTSTRAP_TIMEOUT  = 60

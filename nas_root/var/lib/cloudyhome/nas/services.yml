@@ -142,9 +142,6 @@ ftp:
   image: "delfer/alpine-ftp-server:latest"
   config_dir: "/etc/cloudyhome/ftp"
   control_port: 21
-  passive_ports:
-    min: 21000
-    max: 21010
   users_ref: ["ftp/users/scanner1"]
   upload_root: "/zpool0/shares/scanner-inbox"
 

@@ -1,10 +1,12 @@
 """Template rendering and atomic file writing."""
 import filecmp
+import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 
 import jinja2
 
@@ -49,12 +51,38 @@ def validate_samba(path):
         raise RuntimeError(f"Samba validation failed: {result.stderr}")
 
 
-def atomic_write(content, dest, mode=0o644, owner="root:root", validator=None, run_dir=RUN_DIR):
+def validate_toml(path):
+    """Validate TOML syntax."""
+    with open(path, "rb") as f:
+        try:
+            tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise RuntimeError(f"TOML validation failed: {e}")
+
+
+def validate_iscsi_saveconfig(path):
+    """Validate iSCSI saveconfig.json structure."""
+    with open(path) as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"iSCSI saveconfig is not valid JSON: {e}")
+    for key in ("fabric_modules", "storage_objects", "targets"):
+        if key not in data:
+            raise RuntimeError(f"iSCSI saveconfig missing required key: {key}")
+    for target in data["targets"]:
+        if "wwn" not in target:
+            raise RuntimeError(f"iSCSI target missing 'wwn': {target}")
+        if not target.get("tpgs"):
+            raise RuntimeError(f"iSCSI target {target.get('wwn')} has no TPGs")
+
+
+def atomic_write(content, dest, mode=0o644, dir_mode=0o755, owner="root:root", validator=None, run_dir=RUN_DIR):
     """Write content to dest atomically via temp file, with optional validation.
 
     Returns True if the file was updated, False if unchanged.
     """
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    os.makedirs(os.path.dirname(dest), mode=dir_mode, exist_ok=True)
     os.makedirs(run_dir, exist_ok=True)
 
     fd, tmp_path = tempfile.mkstemp(dir=run_dir, prefix="render.")

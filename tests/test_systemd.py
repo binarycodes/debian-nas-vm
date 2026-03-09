@@ -55,11 +55,10 @@ class TestServiceOrdering:
 
     def test_garage_bootstrap_after_garage(self):
         u = load_unit("cloudyhome-garage-bootstrap.service")
-        assert "cloudyhome-garage.service" in u["Unit"]["After"]
+        after = u["Unit"]["After"]
+        assert "cloudyhome-garage.service" in after
+        assert "cloudyhome-nas-apply.service" in after
 
-    def test_scrub_after_zfs_import(self):
-        u = load_unit("cloudyhome-zfs-scrub.service")
-        assert "cloudyhome-zfs-import.service" in u["Unit"]["After"]
 
 
 class TestServiceProperties:
@@ -71,7 +70,6 @@ class TestServiceProperties:
             "cloudyhome-nas-render.service",
             "cloudyhome-nas-firewall.service",
             "cloudyhome-nas-apply.service",
-            "cloudyhome-zfs-scrub.service",
             "cloudyhome-garage-bootstrap.service",
         ):
             u = load_unit(name)
@@ -119,6 +117,34 @@ class TestServiceProperties:
         assert "multi-user.target" in u["Install"]["WantedBy"]
 
 
+class TestNasReadyTarget:
+    def test_target_exists(self):
+        path = os.path.join(SYSTEMD_DIR, "cloudyhome-nas-ready.target")
+        assert os.path.exists(path)
+
+    def test_target_after_apply(self):
+        u = load_unit("cloudyhome-nas-ready.target")
+        after = u["Unit"]["After"]
+        assert "cloudyhome-nas-apply.service" in after
+
+    def test_target_after_nas_services(self):
+        u = load_unit("cloudyhome-nas-ready.target")
+        after = u["Unit"]["After"]
+        for svc in (
+            "nfs-server.service",
+            "smbd.service",
+            "target.service",
+            "cloudyhome-garage.service",
+            "cloudyhome-garage-bootstrap.service",
+            "cloudyhome-ftp.service",
+        ):
+            assert svc in after, f"cloudyhome-nas-ready.target missing After={svc}"
+
+    def test_apply_wants_ready_target(self):
+        u = load_unit("cloudyhome-nas-apply.service")
+        assert "cloudyhome-nas-ready.target" in u["Unit"]["Wants"]
+
+
 class TestGarageBootstrapUnit:
     def test_no_wanted_by(self):
         u = load_unit("cloudyhome-garage-bootstrap.service")
@@ -127,6 +153,10 @@ class TestGarageBootstrapUnit:
     def test_wants_garage_service(self):
         u = load_unit("cloudyhome-garage-bootstrap.service")
         assert "cloudyhome-garage.service" in u["Unit"]["Wants"]
+
+    def test_remain_after_exit(self):
+        u = load_unit("cloudyhome-garage-bootstrap.service")
+        assert u["Service"].get("RemainAfterExit") == "yes"
 
 
 class TestTimerUnit:
@@ -153,7 +183,6 @@ class TestScriptPaths:
         "cloudyhome-nas-firewall.service": "/usr/sbin/nft -f /etc/nftables.conf",
         "cloudyhome-nas-apply.service": "/usr/local/sbin/nas-apply-config",
         "cloudyhome-garage-bootstrap.service": "/usr/local/sbin/nas-garage-bootstrap",
-        "cloudyhome-zfs-scrub.service": "/usr/sbin/zpool scrub zpool0",
     }
 
     @pytest.mark.parametrize("unit,expected_exec", EXPECTED.items())

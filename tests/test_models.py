@@ -6,7 +6,7 @@ from cloudyhome.models import (
     NasConfig, StorageConfig, StorageDataset, FirewallConfig, FirewallRule,
     NfsConfig, NfsExport, NfsClient, IdentityMap, SambaConfig, SambaShare,
     SambaGlobal, IscsiConfig, IscsiTarget, IscsiLun, IscsiAuth,
-    GarageConfig, FtpConfig, PassivePorts, HealthConfig, HealthAlert,
+    GarageConfig, FtpConfig, HealthConfig, HealthAlert,
     SecretsConfig,
 )
 
@@ -281,6 +281,25 @@ class TestGarageConfig:
                 layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
             )
 
+    def test_bootstrap_timeout_default(self):
+        g = GarageConfig(
+            image="img", rpc_port=3901, s3_port=3900, admin_port=3903,
+            s3_region="g", replication_mode="none", config_dir="/etc/g",
+            data_dir="/zpool0/d", metadata_dir="/zpool0/m",
+            layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
+        )
+        assert g.bootstrap_timeout == 60
+
+    def test_bootstrap_timeout_configurable(self):
+        g = GarageConfig(
+            image="img", rpc_port=3901, s3_port=3900, admin_port=3903,
+            s3_region="g", replication_mode="none", config_dir="/etc/g",
+            data_dir="/zpool0/d", metadata_dir="/zpool0/m",
+            layout_capacity="1G", admin_token_ref="x", rpc_secret_ref="y",
+            bootstrap_timeout=120,
+        )
+        assert g.bootstrap_timeout == 120
+
     def test_replication_mode_values(self):
         for valid in ("none", "1", "2", "3"):
             # Just test the validator doesn't raise
@@ -304,7 +323,6 @@ class TestFtpConfig:
         with pytest.raises(ValidationError, match="control_port must be 21"):
             FtpConfig(
                 image="img", config_dir="/etc/f", control_port=2121,
-                passive_ports={"min": 21000, "max": 21010},
                 users_ref=["ftp/users/u"], upload_root="/zpool0/ftp",
             )
 
@@ -312,13 +330,8 @@ class TestFtpConfig:
         with pytest.raises(ValidationError, match="config_dir must be absolute"):
             FtpConfig(
                 image="img", config_dir="relative/path", control_port=21,
-                passive_ports={"min": 21000, "max": 21010},
                 users_ref=["ftp/users/u"], upload_root="/zpool0/ftp",
             )
-
-    def test_passive_ports_min_le_max(self):
-        with pytest.raises(ValidationError, match="passive_ports min must be <= max"):
-            PassivePorts(min=22000, max=21000)
 
 
 class TestHealthConfig:

@@ -9,6 +9,7 @@ from cloudyhome.constants import (
     FIREWALL_VALID_PROTOS,
     FIREWALL_WELL_KNOWN_PORTS,
     FTP_CONTROL_PORT,
+    GARAGE_BOOTSTRAP_TIMEOUT,
     GARAGE_REPLICATION_MODES,
     ISCSI_VALID_AUTH_MODES,
     NFS_VERSION,
@@ -417,16 +418,6 @@ class IscsiConfig(BaseModel):
         return self
 
 
-class PassivePorts(BaseModel):
-    min: int
-    max: int
-
-    @model_validator(mode="after")
-    def min_le_max(self):
-        if self.min > self.max:
-            raise ValueError("passive_ports min must be <= max")
-        return self
-
 
 class GarageConfig(BaseModel):
     enabled: bool = True
@@ -444,6 +435,7 @@ class GarageConfig(BaseModel):
     layout_capacity: str
     admin_token_ref: str
     rpc_secret_ref: str
+    bootstrap_timeout: int = GARAGE_BOOTSTRAP_TIMEOUT
 
     @field_validator("runtime")
     @classmethod
@@ -482,7 +474,6 @@ class FtpConfig(BaseModel):
     image: str
     config_dir: str
     control_port: int
-    passive_ports: PassivePorts
     users_ref: list[str]
     upload_root: str
 

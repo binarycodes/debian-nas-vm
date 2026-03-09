@@ -5,10 +5,9 @@ import logging
 import sys
 import time
 import urllib.request
-import urllib.error
 
 import yaml
-from cloudyhome.constants import GARAGE_MAX_ATTEMPTS, GARAGE_POLL_INTERVAL, SERVICES_PATH
+from cloudyhome.constants import GARAGE_POLL_INTERVAL, SERVICES_PATH
 from cloudyhome.secrets import secrets_context, resolve_ref
 
 logging.basicConfig(format="%(message)s", level=logging.INFO)
@@ -45,6 +44,7 @@ def main():
     admin_port = garage["admin_port"]
     layout_capacity = garage["layout_capacity"]
     admin_token_ref = garage["admin_token_ref"]
+    max_attempts = garage.get("bootstrap_timeout", 60) // GARAGE_POLL_INTERVAL
 
     with secrets_context() as secrets:
         admin_token = resolve_ref(secrets, admin_token_ref)
@@ -55,16 +55,17 @@ def main():
         base_url = f"http://{host_ip}:{admin_port}"
 
         # Wait for Garage to be ready
-        log.info("Waiting for Garage to become ready...")
+        log.info("Waiting for Garage to become ready (timeout %ds)...", max_attempts * GARAGE_POLL_INTERVAL)
         status = None
-        for attempt in range(1, GARAGE_MAX_ATTEMPTS + 1):
+        for attempt in range(1, max_attempts + 1):
             try:
                 status = api_request(f"{base_url}/v1/status", admin_token)
-                log.info("Garage is ready (attempt %d/%d)", attempt, GARAGE_MAX_ATTEMPTS)
+                log.info("Garage is ready (attempt %d/%d)", attempt, max_attempts)
                 break
-            except (urllib.error.URLError, ConnectionError, OSError):
-                if attempt == GARAGE_MAX_ATTEMPTS:
-                    log.error("Garage did not become ready after %d attempts", GARAGE_MAX_ATTEMPTS)
+            except Exception as exc:
+                log.debug("Attempt %d/%d failed: %s: %s", attempt, max_attempts, type(exc).__name__, exc)
+                if attempt == max_attempts:
+                    log.error("Garage did not become ready after %d attempts: %s: %s", max_attempts, type(exc).__name__, exc)
                     sys.exit(1)
                 time.sleep(GARAGE_POLL_INTERVAL)
 

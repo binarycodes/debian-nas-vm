@@ -9,7 +9,7 @@ import yaml
 
 from cloudyhome.models import NasConfig
 from cloudyhome.secrets import resolve_ref
-from cloudyhome.render import render_template, atomic_write, get_jinja_env
+from cloudyhome.render import render_template, atomic_write, get_jinja_env, validate_toml, validate_iscsi_saveconfig
 
 # Import build functions from the render script (no .py extension)
 RENDER_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "nas_root", "usr", "local", "sbin", "nas-render-config")
@@ -162,9 +162,6 @@ class TestTemplateRendering:
         ctx, config = full_context
         content = render_template("ftp.env.j2", ctx, template_dir)
         assert "USERS=scanner1|REDACTED" in content
-        assert "ADDRESS=10.0.0.1" in content
-        assert "MIN_PORT=21000" in content
-        assert "MAX_PORT=21010" in content
 
     def test_garage_container_renders(self, full_context, template_dir):
         ctx, config = full_context
@@ -277,6 +274,13 @@ class TestAtomicWrite:
         run_dir = str(tmp_path / "run")
         atomic_write("hello\n", dest, run_dir=run_dir)
         assert open(dest).read() == "hello\n"
+
+    def test_dir_mode_applied(self, tmp_path):
+        dest = str(tmp_path / "private" / "test.conf")
+        run_dir = str(tmp_path / "run")
+        atomic_write("hello\n", dest, dir_mode=0o700, run_dir=run_dir)
+        dir_mode = oct(os.stat(str(tmp_path / "private")).st_mode & 0o777)
+        assert dir_mode == oct(0o700)
 
 
 class TestBuildContextOptional:
@@ -436,6 +440,87 @@ class TestExportsTemplateFallback:
         content = render_template("exports.j2", ctx, template_dir)
         assert "ro" in content
         assert "async" in content
+
+
+class TestZfsScrubServiceTemplate:
+    def test_pool_name_substituted(self, services_raw, secrets_raw, template_dir):
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("cloudyhome-zfs-scrub.service.j2", ctx, template_dir)
+        assert f"zpool scrub {config.storage.pool}" in content
+
+    def test_different_pool_name_substituted(self, services_raw, secrets_raw, template_dir):
+        services_raw["storage"]["pool"] = "tank"
+        for ds in services_raw["storage"]["datasets"].values():
+            ds["path"] = ds["path"].replace("/zpool0/", "/tank/")
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("cloudyhome-zfs-scrub.service.j2", ctx, template_dir)
+        assert "zpool scrub tank" in content
+        assert "zpool0" not in content
+
+    def test_after_zfs_import(self, services_raw, secrets_raw, template_dir):
+        config = NasConfig(**services_raw)
+        ctx = build_context(config, secrets_raw)
+        content = render_template("cloudyhome-zfs-scrub.service.j2", ctx, template_dir)
+        assert "After=cloudyhome-zfs-import.service" in content
+
+
+class TestValidateToml:
+    def test_valid_toml_passes(self, tmp_path):
+        f = tmp_path / "ok.toml"
+        f.write_bytes(b'[section]\nkey = "value"\n')
+        validate_toml(str(f))  # should not raise
+
+    def test_invalid_toml_raises(self, tmp_path):
+        f = tmp_path / "bad.toml"
+        f.write_bytes(b"key = [unclosed\n")
+        with pytest.raises(RuntimeError, match="TOML validation failed"):
+            validate_toml(str(f))
+
+
+class TestValidateIscsiSaveconfig:
+    def _valid(self):
+        return {
+            "fabric_modules": [{"name": "iscsi"}],
+            "storage_objects": [],
+            "targets": [{"wwn": "iqn.2024-01.com.example:target1", "tpgs": [{"tag": 1}]}],
+        }
+
+    def test_valid_saveconfig_passes(self, tmp_path):
+        f = tmp_path / "saveconfig.json"
+        f.write_text(json.dumps(self._valid()))
+        validate_iscsi_saveconfig(str(f))  # should not raise
+
+    def test_invalid_json_raises(self, tmp_path):
+        f = tmp_path / "saveconfig.json"
+        f.write_text("{not json}")
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            validate_iscsi_saveconfig(str(f))
+
+    def test_missing_key_raises(self, tmp_path):
+        data = self._valid()
+        del data["targets"]
+        f = tmp_path / "saveconfig.json"
+        f.write_text(json.dumps(data))
+        with pytest.raises(RuntimeError, match="missing required key: targets"):
+            validate_iscsi_saveconfig(str(f))
+
+    def test_target_missing_wwn_raises(self, tmp_path):
+        data = self._valid()
+        data["targets"][0].pop("wwn")
+        f = tmp_path / "saveconfig.json"
+        f.write_text(json.dumps(data))
+        with pytest.raises(RuntimeError, match="missing 'wwn'"):
+            validate_iscsi_saveconfig(str(f))
+
+    def test_target_missing_tpgs_raises(self, tmp_path):
+        data = self._valid()
+        data["targets"][0]["tpgs"] = []
+        f = tmp_path / "saveconfig.json"
+        f.write_text(json.dumps(data))
+        with pytest.raises(RuntimeError, match="no TPGs"):
+            validate_iscsi_saveconfig(str(f))
 
 
 class TestRenderStructure:
