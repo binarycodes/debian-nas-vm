@@ -7,6 +7,10 @@ on:
         description: 'Version to release (e.g. 1.2.3)'
         required: true
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   open-release-pr:
     runs-on: ubuntu-latest
