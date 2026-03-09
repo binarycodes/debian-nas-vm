@@ -114,13 +114,13 @@ class TestFirewallConfig:
             FirewallRule(service="x", ports=[22], proto=[], sources_ref="y")
 
     def test_well_known_ports_allowed(self):
-        for port in (22, 445, 21):
+        for port in (21, 22, 80, 443, 445):
             r = FirewallRule(service="x", ports=[port], proto=["tcp"], sources_ref="y")
             assert port in r.ports
 
     def test_non_well_known_port_below_1001(self):
-        with pytest.raises(ValidationError, match="port 80 must be 1001-65535"):
-            FirewallRule(service="x", ports=[80], proto=["tcp"], sources_ref="y")
+        with pytest.raises(ValidationError, match="port 810 must be 1001-65535"):
+            FirewallRule(service="x", ports=[810], proto=["tcp"], sources_ref="y")
 
 
 class TestNfsConfig:

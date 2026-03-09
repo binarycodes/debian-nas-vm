@@ -8,7 +8,7 @@ SMTP_PORT_MIN = 1      # SMTP port may be any valid TCP port
 # --- Firewall ---
 FIREWALL_VALID_PROTOS        = frozenset({"tcp", "udp"})
 FIREWALL_VALID_DEFAULT_INPUT = frozenset({"drop", "accept"})
-FIREWALL_WELL_KNOWN_PORTS    = frozenset({22, 445, 21})
+FIREWALL_WELL_KNOWN_PORTS    = frozenset({21, 22, 25, 80, 443, 445})
 
 # --- NFS ---
 NFS_VERSION             = 4
@@ -60,6 +60,13 @@ FTP_CONTAINER        = "/etc/containers/systemd/cloudyhome-ftp.container"
 ALERT_CONF           = "/etc/cloudyhome/health/alert.conf"
 MSMTPRC              = "/etc/msmtprc"
 APPLY_SERVICES_SCRIPT = "/etc/cloudyhome/nas-apply-services.sh"
+
+# --- ZFS dataset defaults ---
+ZFS_DATASET_COMPRESSION    = "lz4"
+ZFS_DATASET_ATIME          = "off"
+ZFS_DATASET_DEDUP          = "off"
+ZFS_DATASET_SYNC           = "standard"
+ZFS_DATASET_CASESENSITIVITY = "sensitive"
 
 # --- Garage bootstrap tuning ---
 GARAGE_MAX_ATTEMPTS  = 30

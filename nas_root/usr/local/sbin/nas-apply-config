@@ -7,7 +7,11 @@ import subprocess
 import sys
 
 import yaml
-from cloudyhome.constants import APPLY_LOCK, APPLY_SERVICES_SCRIPT, RUN_DIR, SERVICES_PATH
+from cloudyhome.constants import (
+    APPLY_LOCK, APPLY_SERVICES_SCRIPT, RUN_DIR, SERVICES_PATH,
+    ZFS_DATASET_COMPRESSION, ZFS_DATASET_ATIME, ZFS_DATASET_DEDUP,
+    ZFS_DATASET_SYNC, ZFS_DATASET_CASESENSITIVITY,
+)
 from cloudyhome.models import NasConfig
 from cloudyhome.secrets import secrets_context, resolve_ref
 
@@ -50,7 +54,14 @@ def create_datasets(config):
         full_name = f"{pool}/{key}"
         if not dataset_exists(full_name):
             log.info("Creating dataset %s with mountpoint %s", full_name, ds.path)
-            run_cmd(["zfs", "create", "-o", f"mountpoint={ds.path}", full_name])
+            run_cmd(["zfs", "create",
+                     "-o", f"mountpoint={ds.path}",
+                     "-o", f"compression={ZFS_DATASET_COMPRESSION}",
+                     "-o", f"atime={ZFS_DATASET_ATIME}",
+                     "-o", f"dedup={ZFS_DATASET_DEDUP}",
+                     "-o", f"sync={ZFS_DATASET_SYNC}",
+                     "-o", f"casesensitivity={ZFS_DATASET_CASESENSITIVITY}",
+                     full_name])
 
         # Enforce quota
         current_quota_raw = zfs_get("quota", full_name)

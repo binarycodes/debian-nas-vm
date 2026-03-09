@@ -115,6 +115,61 @@ class TestCreateDatasets:
 
         assert any(c[:2] == ["zfs", "create"] for c in calls)
 
+    def test_creates_with_compression_lz4(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        create_cmd = next(c for c in calls if c[:2] == ["zfs", "create"])
+        assert "compression=lz4" in create_cmd
+
+    def test_creates_with_atime_off(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        create_cmd = next(c for c in calls if c[:2] == ["zfs", "create"])
+        assert "atime=off" in create_cmd
+
+    def test_creates_with_dedup_off(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        create_cmd = next(c for c in calls if c[:2] == ["zfs", "create"])
+        assert "dedup=off" in create_cmd
+
+    def test_creates_with_sync_standard(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        create_cmd = next(c for c in calls if c[:2] == ["zfs", "create"])
+        assert "sync=standard" in create_cmd
+
+    def test_creates_with_casesensitivity_sensitive(self, config, monkeypatch):
+        calls = []
+        monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: False)
+        monkeypatch.setattr(apply_mod, "zfs_get", lambda prop, name: str(10 * 1024**3))
+        monkeypatch.setattr(apply_mod, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+
+        apply_mod.create_datasets(config)
+
+        create_cmd = next(c for c in calls if c[:2] == ["zfs", "create"])
+        assert "casesensitivity=sensitive" in create_cmd
+
     def test_skips_create_when_dataset_exists(self, config, monkeypatch):
         calls = []
         monkeypatch.setattr(apply_mod, "dataset_exists", lambda _: True)
