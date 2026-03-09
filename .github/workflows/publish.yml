@@ -1,0 +1,55 @@
+name: publish
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  publish-release:
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: extract version
+        id: version
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "version=${BRANCH#release/v}" >> "$GITHUB_OUTPUT"
+
+      - name: checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: verify version matches control file
+        run: |
+          CONTROL_VERSION="$(grep '^Version:' packaging/DEBIAN/control | awk '{print $2}')"
+          if [ "$CONTROL_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "ERROR: control file has Version: ${CONTROL_VERSION}, expected ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+      - name: create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}" "${{ github.event.pull_request.merge_commit_sha }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: build deb
+        run: bash packaging/build.sh
+
+      - name: create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          draft: true
+          files: cloudyhome-nas_${{ steps.version.outputs.version }}_all.deb

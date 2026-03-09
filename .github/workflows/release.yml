@@ -8,44 +8,24 @@ on:
         required: true
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./tests
-    steps:
-      - name: checkout
-        uses: actions/checkout@v4
-
-      - name: lint and test
-        run: make validate
-
-  release:
-    needs: validate
+  open-release-pr:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: checkout
         uses: actions/checkout@v4
 
-      - name: bump version and tag
+      - name: bump version in control file
         run: |
           sed -i "s/^Version: .*/Version: ${{ github.event.inputs.version }}/" packaging/DEBIAN/control
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packaging/DEBIAN/control
-          git commit -m "release v${{ github.event.inputs.version }}"
-          git tag "v${{ github.event.inputs.version }}"
-          git push origin HEAD:${{ github.ref_name }} "v${{ github.event.inputs.version }}"
 
-      - name: build deb
-        run: bash packaging/build.sh
-
-      - name: create draft release
-        uses: softprops/action-gh-release@v2
+      - name: open pull request
+        uses: peter-evans/create-pull-request@v8
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: v${{ github.event.inputs.version }}
-          draft: true
-          files: cloudyhome-nas_${{ github.event.inputs.version }}_all.deb
+          sign-commits: true
+          branch: release/v${{ github.event.inputs.version }}
+          title: "release: v${{ github.event.inputs.version }}"
+          body: "Automated release PR for v${{ github.event.inputs.version }}. Merging this PR will build and publish the release."
+          commit-message: "release: bump version to ${{ github.event.inputs.version }}"
