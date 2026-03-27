@@ -153,11 +153,36 @@ The shared lock files ensure the boot chain and API cannot run simultaneously: i
 - Disaster recovery: rebuild VM from image (with baked YAML + SOPS) → first boot bootstraps SQLite → API clients re-converge.
 - API unavailable: NFS/Samba/iSCSI continue serving (kernel and daemon level). The API is required only for config changes.
 
+## Minimal Bootstrap
+
+The VM does not need a full `services.yml` / `secrets.enc.yaml` to boot and start the API. A minimal bootstrap config provides just enough to get the API running, after which all NAS configuration can be done entirely via the API or Terraform.
+
+**Minimal `services.yml`:**
+```yaml
+version: 2
+storage:
+  - pool: "zpool0"
+    datasets: {}
+```
+
+**Minimal `secrets.enc.yaml`:**
+```yaml
+disks:
+  ids:
+    - "ata-WDC_WD40EFRX-68N32N0_WD-XXXXXXXX"
+api:
+  token: "some-bearer-token"
+```
+
+This boots the VM with: disk passthrough and a bearer token. No host IP (set later via `PUT /v1/host` before configuring any services), no firewall (operator handles at another layer), no datasets, no NFS, no Samba, no iSCSI, no S3, no FTP, no alerts. Everything is created later via `terraform apply` or direct API calls.
+
+**Validation changes from MVP1:** MVP1 requires `host_ip_ref`, `firewall` (with a non-empty rules list), and `datasets` (non-empty map per pool). MVP2 relaxes all three — `host_ip_ref` is optional (not needed until services that bind to an IP are configured), `firewall` is optional (if omitted, nftables is not rendered or managed), and `datasets` may be an empty map (`{}`). MVP2 also adds `api.token` to the secrets schema (not present in MVP1).
+
 ## API Design
 
 ### Authentication
 
-Bearer token auth. The token is stored in the SQLite database (imported from `secrets.enc.yaml` at bootstrap). All requests must carry `Authorization: Bearer <token>`. Requests without a valid token receive 401.
+Bearer token auth. The token is stored in the SQLite database (imported from `api.token` in `secrets.enc.yaml` at bootstrap). All requests must carry `Authorization: Bearer <token>`. Requests without a valid token receive 401.
 
 **Token rotation:** `PUT /v1/auth/token` replaces the current bearer token. Requires the current token for authentication. The caller must update the Terraform provider config and any automation scripts after rotation.
 
@@ -445,6 +470,7 @@ On any failure at steps 7–10, the SQLite transaction is rolled back and locks 
 - Singleton resource. GET returns current host IP and disk IDs.
 - PUT updates host IP and/or disk IDs in SQLite. Re-renders all configs that reference the host IP (nftables, S3/Garage, iSCSI portal, etc.) and reloads affected services. Disk IDs are stored for the ZFS import boot-time check.
 - Host IP must be a valid RFC1918 address (same global IP policy as MVP1).
+- Host IP is optional at bootstrap but **required before creating any service that binds to it** (NFS, Samba, iSCSI, S3, firewall). Creating such a service without a host IP set returns 422 `DEPENDENCY_BLOCKED`.
 
 ### S3
 
@@ -480,7 +506,9 @@ All secret values (passwords, CHAP keys, API tokens, CIDRs, SMTP credentials) ar
 
 **API requests:** Secret values are passed as plaintext fields in request bodies (e.g., `"password": "..."` for users, `"chap_secret": "..."` for iSCSI). No `_ref` indirection — the API does not depend on `secrets.enc.yaml` or SOPS at runtime.
 
-**Secret fields in GET responses:** All secret fields are **omitted** from GET responses. These are write-only — accepted in POST/PUT but never returned. This applies to: `samba_user.password`, `ftp_user.password`, `iscsi_target.chap_secret`, `s3.admin_token`, `s3.rpc_secret`, `alerts.smtp_password`. No drift detection on any secret field — out-of-band changes are at the operator's own risk.
+**API bearer token:** Stored in `secrets.enc.yaml` under `api.token`. Imported into SQLite at bootstrap. This is a new secret field added in MVP2 (not present in MVP1's secrets mapping contract). Rotatable via `PUT /v1/auth/token`.
+
+**Secret fields in GET responses:** All secret fields are **omitted** from GET responses. These are write-only — accepted in POST/PUT but never returned. This applies to: `api.token`, `samba_user.password`, `ftp_user.password`, `iscsi_target.chap_secret`, `s3.admin_token`, `s3.rpc_secret`, `alerts.smtp_password`. No drift detection on any secret field — out-of-band changes are at the operator's own risk.
 
 **Export:** `GET /v1/backup/secrets` generates SOPS-encrypted YAML on-the-fly using the age public key supplied in the `X-Encryption-Key` header. SOPS binary is required on the VM for this export path. The age public key can only encrypt (not decrypt), so leaking it is not a security risk.
 
@@ -537,7 +565,8 @@ Move the `cloudyhome` Python package out of `nas_root/` into a standalone projec
 
 ### Phase 1: SQLite and API Foundation
 
-- Define SQLite schema covering all resource types (datasets, NFS exports, Samba shares, iSCSI targets, firewall rules, users, host config, S3, FTP, health alerts) and all secret values (passwords, tokens, CIDRs, CHAP keys, SMTP credentials, email addresses, disk IDs, allowed email domains).
+- Define SQLite schema covering all resource types (datasets, NFS exports, Samba shares, iSCSI targets, firewall rules, users, host config, S3, FTP, health alerts) and all secret values (API bearer token, passwords, tokens, CIDRs, CHAP keys, SMTP credentials, email addresses, disk IDs, allowed email domains).
+- **Relaxed validation from MVP1:** `datasets` may be an empty map per pool (MVP1 required non-empty). `firewall` is optional (MVP1 required it with non-empty rules) — if omitted, nftables is not rendered or managed. `host_ip_ref` is optional (MVP1 required it) — not needed until services that bind to a specific IP are configured. This enables minimal bootstrap where resources are created via the API.
 - **Define Pydantic models with inline values only** — no `_ref` fields. These are used by the API and boot chain. E.g., firewall rules have `"sources": ["10.0.0.0/24"]`; NFS exports have `"clients": [{"cidrs": [...]}]`; iSCSI targets have `"chap_secret": "..."`.
 - Implement bootstrap import script (standalone, does not share models with the API): parse `services.yml` + decrypt `secrets.enc.yaml` → resolve all `_ref` fields → insert inline values into SQLite → write marker → delete YAML files.
 - Implement `cloudyhome-nas-bootstrap.service` to run the import script on first boot (no-op if DB exists).
