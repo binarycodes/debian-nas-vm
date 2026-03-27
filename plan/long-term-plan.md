@@ -41,7 +41,13 @@ Policy model (per-user):
 Constraint:
 - This feature applies only to removable media attached directly to the NAS host (USB/SD physically connected to NAS), not browser-only or remote client-attached media flows.
 
-4. LAN-only emergency portal
+4. Singleton DELETE as service disable
+- Currently singletons (`host`, `general`, `samba_global`, `iscsi_global`) only support GET/PUT — they always exist after bootstrap.
+- MVP3 Terraform provider handles this with create = GET+PUT, delete = no-op (state removal only).
+- Future: DELETE could disable the service entirely (e.g., deleting `samba_global` disables Samba).
+- Requires API-side support for a "disabled" state and corresponding render/apply logic.
+
+5. LAN-only emergency portal
 - Provide a local-network-only recovery/admin portal for break-glass operations when internet/IdP is unavailable.
 - Restrict access to LAN interfaces only (no WAN exposure) with explicit firewall enforcement.
 - Support offline authentication fallback suitable for emergency use.

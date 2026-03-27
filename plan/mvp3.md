@@ -63,6 +63,11 @@ provider "cloudyhome" {
 }
 ```
 
+TLS options:
+- `tls_cert_pem` — pinned cert PEM loaded from a local file. Use when the API runs a self-signed cert.
+- `insecure_skip_verify` — skip TLS verification. Dev/home-use only.
+- **Recommended for production:** inject a stable cert via Packer so it's known at Terraform config time, then pin with `tls_cert_pem`.
+
 ### Resource Types
 
 All resource types map directly to MVP2 API endpoints. Values are inline (no `_ref` fields — the API accepts actual values).
@@ -74,39 +79,39 @@ All resource types map directly to MVP2 API endpoints. Values are inline (no `_r
 | `cloudyhome_dataset` | `/v1/datasets/{key}` | `key` | `quota` updatable; `path` set at create |
 | `cloudyhome_nfs_export` | `/v1/nfs/exports/{name}` | `name` | Clients list with inline CIDRs, fully replaced on update |
 | `cloudyhome_samba_share` | `/v1/samba/shares/{name}` | `name` | References users by username |
-| `cloudyhome_samba_user` | `/v1/samba/users/{username}` | `username` | Password is plaintext over TLS, sensitive |
+| `cloudyhome_samba_user` | `/v1/samba/users/{username}` | `username` | Password is write-only (accepted in POST/PUT, omitted from GET) |
 | `cloudyhome_iscsi_target` | `/v1/iscsi/targets/{name}` | `name` | LUNs, initiators, inline CHAP credentials |
 | `cloudyhome_firewall_rule` | `/v1/firewall/rules/{service}` | `service` | Inline source IPs/CIDRs |
-| `cloudyhome_ftp_user` | `/v1/ftp/users/{username}` | `username` | Password is plaintext over TLS, sensitive |
+| `cloudyhome_ftp_user` | `/v1/ftp/users/{username}` | `username` | Password is write-only (accepted in POST/PUT, omitted from GET) |
 
 #### Singleton Resources
 
-Singleton resources represent global configuration. They always exist (at most one instance). Terraform `create` maps to API POST (or PUT if already present). `delete` removes the config from the API.
+Singleton resources represent global configuration. They always exist (at most one instance). Terraform `create` = GET existing + PUT. Terraform `delete` = no-op (resource removed from state only, stays in API). Import requires an explicit empty string ID: `terraform import cloudyhome_s3.main ""` — the provider rejects any non-empty import ID for singletons.
 
 | Terraform Resource | API Endpoint | Notes |
 |---|---|---|
 | `cloudyhome_samba_global` | `/v1/samba` | workgroup, server_string, min_protocol |
 | `cloudyhome_iscsi_global` | `/v1/iscsi` | base_iqn, portal_port, dataset |
-| `cloudyhome_garage` | `/v1/garage` | Full Garage config including secrets (admin_token, rpc_secret) |
+| `cloudyhome_s3` | `/v1/s3` | S3 service config including secrets (admin_token, rpc_secret). Currently backed by Garage. |
 | `cloudyhome_ftp` | `/v1/ftp` | FTP service config (image, ports, dirs) |
-| `cloudyhome_alerting` | `/v1/alerting` | SMTP config, email addresses, credentials |
+| `cloudyhome_alerts` | `/v1/alerts` | SMTP config, email addresses, credentials |
 | `cloudyhome_host` | `/v1/host` | Host IP, disk IDs |
-| `cloudyhome_general` | `/v1/cloudyhome/general` | allowed_email_domains |
+| `cloudyhome_general` | `/v1/general` | allowed_email_domains |
 
 ### Data Sources
 
 | Terraform Data Source | API Endpoint | Returns |
 |---|---|---|
 | `data.cloudyhome_dataset` | `GET /v1/datasets/{key}` | Quota, used, available, mountpoint |
-| `data.cloudyhome_zpool` | `GET /v1/zpool` | Live health, capacity, scrub state |
-| `data.cloudyhome_pools` | `GET /v1/pools` | Pool names and dataset inventory |
+| `data.cloudyhome_zpools` | `GET /v1/zpools` | List all pools with live status |
+| `data.cloudyhome_zpool` | `GET /v1/zpools/{name}` | Live health, capacity, scrub state for a specific pool |
 | `data.cloudyhome_host` | `GET /v1/host` | Host IP, disk IDs |
 
 ### Per-Resource State Model
 
 Terraform state stores the full resource definition as returned by the API GET. On `terraform plan`, the provider reads current state from the API (GET) and diffs against the Terraform config. On `terraform apply`, it calls POST/PUT/DELETE as appropriate.
 
-The provider always does a GET before applying, so `terraform import` is optional — if a resource already exists when POST is attempted, the API returns `409 CONFLICT` and the provider reads current state via GET and switches to a PUT. However, explicit `terraform import` is supported for all resource types to seed clean state without any side effects.
+On `terraform apply`, if a POST returns `409 CONFLICT`, the provider fails with a clear error message directing the operator to use `terraform import` to adopt the existing resource. This follows standard Terraform provider conventions — explicit imports, no silent auto-adoption.
 
 ### Error Handling and Retries
 
@@ -117,7 +122,7 @@ The provider maps MVP2's error code catalog to Terraform-appropriate behavior:
 | `VALIDATION_FAILED` | 400 | Fail immediately, surface field-level detail to user |
 | `AUTH_REQUIRED` | 401 | Fail immediately |
 | `NOT_FOUND` | 404 | On Read: mark resource as gone (triggers re-create). On Delete: succeed (already gone). |
-| `CONFLICT` | 409 | On Create: read existing resource, diff, update if needed |
+| `CONFLICT` | 409 | On Create: fail with error "resource already exists, use `terraform import`" |
 | `LOCK_CONTENTION` | 409 | Retry with exponential backoff (configurable max retries, default 5) |
 | `DEPENDENCY_BLOCKED` | 422 | Fail immediately, surface blocking dependency detail |
 | `APPLY_FAILED` | 500 | Retry once, then fail |
@@ -129,14 +134,14 @@ The provider distinguishes `CONFLICT` from `LOCK_CONTENTION` using the `error` f
 
 ### Sensitive Fields
 
-Fields containing secrets are marked `Sensitive: true` in the Terraform schema so they don't appear in plan output or state diffs:
+All secret fields are marked `Sensitive: true` and `WriteOnly: true` in the Terraform schema — they don't appear in plan output, state diffs, or GET responses. No drift detection on any secret field. Applies to:
 
 - `cloudyhome_samba_user.password`
 - `cloudyhome_ftp_user.password`
 - `cloudyhome_iscsi_target.auth.chap_secret`
-- `cloudyhome_garage.admin_token`
-- `cloudyhome_garage.rpc_secret`
-- `cloudyhome_alerting.smtp_password`
+- `cloudyhome_s3.admin_token`
+- `cloudyhome_s3.rpc_secret`
+- `cloudyhome_alerts.smtp_password`
 - Provider config `token`
 
 ### Resource Dependencies
@@ -204,7 +209,7 @@ resource "cloudyhome_firewall_rule" "nfs" {
 3. `terraform apply` — provider detects drift (resources in Terraform state that don't exist or differ from API state) and re-creates/updates via the API.
 4. Running state matches Terraform state again.
 
-For faster recovery, an automation pipeline can pull config exports (`GET /v1/config/services` + `GET /v1/config/secrets`) after each change and bake them into the next Packer image. This minimizes the drift Terraform needs to reconcile after a rebuild.
+For faster recovery, an automation pipeline can pull config exports (`GET /v1/backup/services` + `GET /v1/backup/secrets`) after each change and bake them into the next Packer image. This minimizes the drift Terraform needs to reconcile after a rebuild.
 
 ## Out of Scope for MVP3
 
@@ -219,7 +224,7 @@ For faster recovery, an automation pipeline can pull config exports (`GET /v1/co
 - Initialize Go module and provider scaffold with Terraform Plugin Framework.
 - Implement provider config: `endpoint`, `token`, `tls_cert_pem`, `insecure_skip_verify`.
 - Implement HTTP client wrapper (auth header, TLS, error parsing from API error envelope, retry logic for `LOCK_CONTENTION` / `NOT_READY` / `OPERATION_TIMEOUT`).
-- Implement `GET /v1/health` as a provider connectivity check at `terraform init` / `terraform validate`.
+- Implement `GET /v1/ready` as a provider connectivity check at `terraform init` / `terraform validate`.
 
 ### Phase 2: Dataset and Firewall Resources
 
@@ -244,36 +249,28 @@ For faster recovery, an automation pipeline can pull config exports (`GET /v1/co
 
 ### Phase 5: Singleton Resources
 
-- Implement `cloudyhome_garage` (full config + secrets).
+- Implement `cloudyhome_s3` (S3 service config + secrets, currently backed by Garage).
 - Implement `cloudyhome_ftp` (service config).
 - Implement `cloudyhome_ftp_user` (CRUD).
-- Implement `cloudyhome_alerting` (SMTP config + secrets).
+- Implement `cloudyhome_alerts` (SMTP config + secrets).
 - Implement `cloudyhome_host` (IP, disk IDs).
 - Implement `cloudyhome_general` (allowed_email_domains).
 - Add acceptance tests.
 
 ### Phase 6: Data Sources, Testing, and Documentation
 
-- Implement `data.cloudyhome_dataset`, `data.cloudyhome_zpool`, `data.cloudyhome_pools`, `data.cloudyhome_host`.
+- Implement `data.cloudyhome_dataset`, `data.cloudyhome_zpools`, `data.cloudyhome_zpool`, `data.cloudyhome_host`.
 - End-to-end test: boot chain → API start → `terraform apply` → verify services and SQLite state.
 - Validate disaster recovery path: destroy VM, rebuild, `terraform apply` re-converges.
 - Validate import path: bootstrap resources → `terraform import` → `terraform plan` shows no changes.
 - Document provider configuration, example Terraform modules, and import procedures.
 
-## Open Questions
+## Decisions
 
-### Q1: TLS Cert in Terraform Provider Config
-
-The API generates a self-signed cert at first boot (unless a cert is injected via Packer/cloud-init). The Terraform provider must be configured to trust it. Options:
-
-- `tls_cert_pem = file("nas-api.crt")` — pinned cert PEM, loaded from a local file.
-- `insecure_skip_verify = true` — skip verification (dev/home-use only).
-- Inject a stable cert via Packer so it's known at Terraform config time.
-
-### Q2: Provider Repo Location
-
-Should `terraform-provider-cloudyhome` live in:
-- **This repo** (monorepo, Go code alongside Python) — simpler to develop and test together.
-- **A separate repo** — standard Terraform provider convention, cleaner module boundaries, easier to publish to a registry later.
-
-Monorepo is fine for MVP3. A separate repo can be split out later if needed.
+- **TLS:** Provider supports `tls_cert_pem` and `insecure_skip_verify`. Recommended: inject stable cert via Packer, pin with `tls_cert_pem`.
+- **Repo location:** Monorepo (Go provider alongside Python API), but designed for easy separation — self-contained Go module under its own directory with no import dependencies on the Python code. Can be split to a separate repo later for registry publishing.
+- **Singletons:** Create = GET+PUT, Delete = no-op (state removal only). Import requires empty string ID.
+- **Secrets:** All secret fields are write-only. API never returns secrets in GET. No drift detection on any secret field.
+- **Connectivity check:** Provider uses `GET /v1/ready` (not `/v1/health`).
+- **409 CONFLICT on create:** Fail with error directing operator to `terraform import`. No auto-adoption.
+- **Bootstrap import ordering:** Documented recommended order in provider docs, no helper script.

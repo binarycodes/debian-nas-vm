@@ -30,9 +30,9 @@
   - [iSCSI Global](#iscsi-global)
   - [FTP Users](#ftp-users)
   - [Host Config](#host-config)
-  - [Garage](#garage)
+  - [S3](#s3)
   - [FTP](#ftp)
-  - [Health Alerting](#health-alerting)
+  - [Health Alerts](#health-alerting)
 - [Secrets Handling in the API](#secrets-handling-in-the-api)
 - [Model Layer: Inline Values Only](#model-layer-inline-values-only)
 - [Config Export: Reconstructing YAML + SOPS from SQLite](#config-export-reconstructing-yaml--sops-from-sqlite)
@@ -43,7 +43,7 @@
   - [Phase 2: Dataset and Firewall CRUD](#phase-2-dataset-and-firewall-crud)
   - [Phase 3: NFS, Samba, and Samba Users CRUD](#phase-3-nfs-samba-and-samba-users-crud)
   - [Phase 4: iSCSI CRUD](#phase-4-iscsi-crud)
-  - [Phase 5: Garage, FTP, Health, and Host Config](#phase-5-garage-ftp-health-and-host-config)
+  - [Phase 5: S3, FTP, Health, and Host Config](#phase-5-s3-ftp-health-and-host-config)
   - [Phase 6: Integration Testing and Documentation](#phase-6-integration-testing-and-documentation)
 - [Open Questions](#open-questions)
 
@@ -98,8 +98,8 @@ A SQLite database at `/var/lib/cloudyhome/db` is the persistent source of truth 
 - All secret values (passwords, CHAP keys, tokens, CIDRs) are stored as plaintext in the SQLite DB. This is acceptable — the SOPS-encrypted YAML was only needed because secrets were baked into the VM image. At runtime, the API receives plaintext secrets over TLS directly.
 
 **Config export (for backup / rebake):**
-- `GET /v1/config/services` generates `services.yml` on-the-fly from SQLite and serves it. No file is written to disk.
-- `GET /v1/config/secrets` generates `secrets.enc.yaml` on-the-fly from SQLite, encrypted with SOPS using an age public key supplied by the caller in the `X-Encryption-Key` header. No file is written to disk.
+- `GET /v1/backup/services` generates `services.yml` on-the-fly from SQLite and serves it. No file is written to disk.
+- `GET /v1/backup/secrets` generates `secrets.enc.yaml` on-the-fly from SQLite, encrypted with SOPS using an age public key supplied by the caller in the `X-Encryption-Key` header. No file is written to disk.
 - An automation pipeline pulls these after changes and feeds them into the next Packer build, where they become the bootstrap seed for a new VM.
 
 **Disaster recovery:** Rebuild VM from image (which has the baked `services.yml` + `secrets.enc.yaml`) → first boot imports into SQLite → API clients (Terraform in MVP3, or operator requests) re-converge any remaining state.
@@ -157,9 +157,11 @@ The shared lock files ensure the boot chain and API cannot run simultaneously: i
 
 ### Authentication
 
-Bearer token auth. The token is stored in the SQLite database (imported from `secrets.enc.yaml` at bootstrap, or set via API). All requests must carry `Authorization: Bearer <token>`. Requests without a valid token receive 401.
+Bearer token auth. The token is stored in the SQLite database (imported from `secrets.enc.yaml` at bootstrap). All requests must carry `Authorization: Bearer <token>`. Requests without a valid token receive 401.
 
-**Auth boundary:** Only `GET /v1/health` (liveness) and `GET /v1/ready` (readiness) are unauthenticated. All other endpoints — including read-only ones like `/v1/zpool` and the config download endpoints — require a valid bearer token.
+**Token rotation:** `PUT /v1/auth/token` replaces the current bearer token. Requires the current token for authentication. The caller must update the Terraform provider config and any automation scripts after rotation.
+
+**Auth boundary:** Only `GET /v1/health` (liveness) and `GET /v1/ready` (readiness) are unauthenticated. All other endpoints — including read-only ones like `/v1/zpools` and the config download endpoints — require a valid bearer token.
 
 ### TLS
 
@@ -276,8 +278,8 @@ All endpoints are under the `/v1/` prefix.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/cloudyhome/general` | Get general settings (allowed_email_domains) |
-| PUT | `/v1/cloudyhome/general` | Update general settings |
+| GET | `/v1/general` | Get general settings (allowed_email_domains) |
+| PUT | `/v1/general` | Update general settings |
 
 #### Host Config
 
@@ -286,14 +288,14 @@ All endpoints are under the `/v1/` prefix.
 | GET | `/v1/host` | Get host config (IP address, disk IDs) |
 | PUT | `/v1/host` | Update host config |
 
-#### Garage
+#### S3
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/garage` | Get Garage config (singleton) |
-| POST | `/v1/garage` | Create Garage config (409 if already exists) |
-| PUT | `/v1/garage` | Update Garage config |
-| DELETE | `/v1/garage` | Remove Garage config (stops and removes Quadlet) |
+| GET | `/v1/s3` | Get S3 config (singleton, currently backed by Garage) |
+| POST | `/v1/s3` | Create S3 config (409 if already exists) |
+| PUT | `/v1/s3` | Update S3 config |
+| DELETE | `/v1/s3` | Remove S3 config (stops and removes Quadlet) |
 
 #### FTP
 
@@ -304,28 +306,34 @@ All endpoints are under the `/v1/` prefix.
 | PUT | `/v1/ftp` | Update FTP config |
 | DELETE | `/v1/ftp` | Remove FTP config (stops and removes Quadlet) |
 
-#### Health Alerting
+#### Health Alerts
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/alerting` | Get health alert config (singleton) |
-| POST | `/v1/alerting` | Create health alert config (409 if already exists) |
-| PUT | `/v1/alerting` | Update health alert config |
-| DELETE | `/v1/alerting` | Remove health alert config (disables email alerting; smartd/ZED continue logging to journal) |
+| GET | `/v1/alerts` | Get health alert config (singleton) |
+| POST | `/v1/alerts` | Create health alert config (409 if already exists) |
+| PUT | `/v1/alerts` | Update health alert config |
+| DELETE | `/v1/alerts` | Remove health alert config (disables email alerting; smartd/ZED continue logging to journal) |
 
-#### Config Export
+#### Backup Export
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/config/services` | Generate and download `services.yml` from SQLite on-the-fly (auth required, `Content-Type: application/x-yaml`). No file is written to disk. |
-| GET | `/v1/config/secrets` | Generate and download `secrets.enc.yaml` from SQLite on-the-fly, encrypted with SOPS using the age public key in the `X-Encryption-Key` request header (auth required, `Content-Type: application/octet-stream`). Returns 400 if header is missing. No file is written to disk. |
+| GET | `/v1/backup/services` | Generate and download `services.yml` from SQLite on-the-fly (auth required, `Content-Type: application/x-yaml`). No file is written to disk. |
+| GET | `/v1/backup/secrets` | Generate and download `secrets.enc.yaml` from SQLite on-the-fly, encrypted with SOPS using the age public key in the `X-Encryption-Key` request header (auth required, `Content-Type: application/octet-stream`). Returns 400 if header is missing. No file is written to disk. |
+
+#### Auth
+
+| Method | Path | Description |
+|--------|------|-------------|
+| PUT | `/v1/auth/token` | Rotate the bearer token. Request body: `{ "token": "<new-token>" }`. Requires current token for auth. |
 
 #### System / Read-only
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/pools` | List storage pools from SQLite config (pool names and dataset inventory) |
-| GET | `/v1/zpool` | Live pool status, health, capacity, scrub state (from `zpool status`) |
+| GET | `/v1/zpools` | List all pools with live status, health, capacity, scrub state (from `zpool status`) |
+| GET | `/v1/zpools/{name}` | Live status for a specific pool |
 | GET | `/v1/health` | Liveness check — no auth required, returns `{ "status": "ok" }`. Reports only that the process is running. |
 | GET | `/v1/ready` | Readiness check — no auth required. Returns `{ "status": "ready" }` when the SQLite DB is open, config is loaded, and the API can process mutations. Returns 503 otherwise. |
 
@@ -435,14 +443,14 @@ On any failure at steps 7–10, the SQLite transaction is rolled back and locks 
 ### Host Config
 
 - Singleton resource. GET returns current host IP and disk IDs.
-- PUT updates host IP and/or disk IDs in SQLite. Re-renders all configs that reference the host IP (nftables, Garage, iSCSI portal, etc.) and reloads affected services. Disk IDs are stored for the ZFS import boot-time check.
+- PUT updates host IP and/or disk IDs in SQLite. Re-renders all configs that reference the host IP (nftables, S3/Garage, iSCSI portal, etc.) and reloads affected services. Disk IDs are stored for the ZFS import boot-time check.
 - Host IP must be a valid RFC1918 address (same global IP policy as MVP1).
 
-### Garage
+### S3
 
-- Singleton resource. POST creates the full Garage config (image, ports, directories, secrets). PUT updates it. DELETE removes it.
+- Singleton resource. The S3 endpoint abstracts the underlying implementation (currently Garage). POST creates the full S3 config (image, ports, directories, secrets). PUT updates it. DELETE removes it.
 - POST/PUT: re-renders `garage.toml` and the Quadlet `.container` file, reloads systemd (`daemon-reload`), starts/restarts the Garage container.
-- DELETE: stops the Garage container, removes the Quadlet file, reloads systemd. Does not destroy Garage data directories.
+- DELETE: stops the Garage container, removes the Quadlet file, reloads systemd. Does not destroy data directories.
 - Request body includes actual secret values (`admin_token`, `rpc_secret`) — stored as plaintext in SQLite.
 - `enabled` field controls whether the container is started. Config is always rendered regardless of `enabled` (consistent with MVP1).
 
@@ -453,7 +461,7 @@ On any failure at steps 7–10, the SQLite transaction is rolled back and locks 
 - DELETE: stops the FTP container, removes the Quadlet file, reloads systemd.
 - Request body includes actual FTP user credentials — stored as plaintext in SQLite.
 
-### Health Alerting
+### Health Alerts
 
 - Singleton resource. POST creates alert config. PUT updates it. DELETE removes it.
 - POST/PUT: re-renders `alert.conf` and `/etc/msmtprc`, reloads no services (alert script reads config at invocation time).
@@ -472,7 +480,9 @@ All secret values (passwords, CHAP keys, API tokens, CIDRs, SMTP credentials) ar
 
 **API requests:** Secret values are passed as plaintext fields in request bodies (e.g., `"password": "..."` for users, `"chap_secret": "..."` for iSCSI). No `_ref` indirection — the API does not depend on `secrets.enc.yaml` or SOPS at runtime.
 
-**Export:** `GET /v1/config/secrets` generates SOPS-encrypted YAML on-the-fly using the age public key supplied in the `X-Encryption-Key` header. SOPS binary is required on the VM for this export path. The age public key can only encrypt (not decrypt), so leaking it is not a security risk.
+**Secret fields in GET responses:** All secret fields are **omitted** from GET responses. These are write-only — accepted in POST/PUT but never returned. This applies to: `samba_user.password`, `ftp_user.password`, `iscsi_target.chap_secret`, `s3.admin_token`, `s3.rpc_secret`, `alerts.smtp_password`. No drift detection on any secret field — out-of-band changes are at the operator's own risk.
+
+**Export:** `GET /v1/backup/secrets` generates SOPS-encrypted YAML on-the-fly using the age public key supplied in the `X-Encryption-Key` header. SOPS binary is required on the VM for this export path. The age public key can only encrypt (not decrypt), so leaking it is not a security risk.
 
 ## Model Layer: Inline Values Only
 
@@ -527,7 +537,7 @@ Move the `cloudyhome` Python package out of `nas_root/` into a standalone projec
 
 ### Phase 1: SQLite and API Foundation
 
-- Define SQLite schema covering all resource types (datasets, NFS exports, Samba shares, iSCSI targets, firewall rules, users, host config, Garage, FTP, health alerting) and all secret values (passwords, tokens, CIDRs, CHAP keys, SMTP credentials, email addresses, disk IDs, allowed email domains).
+- Define SQLite schema covering all resource types (datasets, NFS exports, Samba shares, iSCSI targets, firewall rules, users, host config, S3, FTP, health alerts) and all secret values (passwords, tokens, CIDRs, CHAP keys, SMTP credentials, email addresses, disk IDs, allowed email domains).
 - **Define Pydantic models with inline values only** — no `_ref` fields. These are used by the API and boot chain. E.g., firewall rules have `"sources": ["10.0.0.0/24"]`; NFS exports have `"clients": [{"cidrs": [...]}]`; iSCSI targets have `"chap_secret": "..."`.
 - Implement bootstrap import script (standalone, does not share models with the API): parse `services.yml` + decrypt `secrets.enc.yaml` → resolve all `_ref` fields → insert inline values into SQLite → write marker → delete YAML files.
 - Implement `cloudyhome-nas-bootstrap.service` to run the import script on first boot (no-op if DB exists).
@@ -536,7 +546,7 @@ Move the `cloudyhome` Python package out of `nas_root/` into a standalone projec
 - Implement configurable mutation timeout (default 60s, via environment variable).
 - Implement `GET /v1/health` (liveness, no auth required).
 - Implement `GET /v1/ready` (readiness, no auth — checks SQLite open, config loaded).
-- Implement config export endpoints with ref/secret reconstruction: `GET /v1/config/services` (generate YAML with `_ref` fields from SQLite) and `GET /v1/config/secrets` (generate SOPS-encrypted YAML with actual values from SQLite, using `X-Encryption-Key` header). The ref path scheme follows MVP1's secrets mapping contract.
+- Implement config export endpoints with ref/secret reconstruction: `GET /v1/backup/services` (generate YAML with `_ref` fields from SQLite) and `GET /v1/backup/secrets` (generate SOPS-encrypted YAML with actual values from SQLite, using `X-Encryption-Key` header). The ref path scheme follows MVP1's secrets mapping contract.
 - Implement `cloudyhome-nas-tls.service` (one-shot, before the API service): generate self-signed cert with `openssl req -x509` only if `/etc/cloudyhome/api/tls.{crt,key}` are not already present.
 - Add `cloudyhome-nas-api.service` systemd unit (after `cloudyhome-nas-apply.service`; `ExecStart=/usr/local/bin/nas-api`).
 - Add the management port to the firewall in the bootstrap example config.
@@ -564,15 +574,15 @@ Move the `cloudyhome` Python package out of `nas_root/` into a standalone projec
 - Implement zvol create with busy-check before delete.
 - Add tests.
 
-### Phase 5: Garage, FTP, Health, and Host Config
+### Phase 5: S3, FTP, Health, and Host Config
 
 - Implement host config endpoints (`GET /v1/host`, `PUT /v1/host`). Mutations re-render all configs referencing host IP.
-- Implement Garage singleton CRUD. POST/PUT re-renders `garage.toml` + Quadlet, manages container lifecycle.
+- Implement S3 singleton CRUD (`/v1/s3`). POST/PUT re-renders `garage.toml` + Quadlet, manages container lifecycle.
 - Implement FTP singleton CRUD. POST/PUT re-renders `ftp.env` + Quadlet, manages container lifecycle.
 - Implement FTP user endpoints (`/v1/ftp/users`): full CRUD. Changes re-render `ftp.env`, restart FTP container.
-- Implement health alerting singleton CRUD. POST/PUT re-renders `alert.conf` + `msmtprc`.
-- Implement general config endpoints (`GET/PUT /v1/cloudyhome/general`) for `allowed_email_domains`.
-- Implement read-only `GET /v1/pools` (list storage pools from SQLite).
+- Implement health alerts singleton CRUD. POST/PUT re-renders `alert.conf` + `msmtprc`.
+- Implement general config endpoints (`GET/PUT /v1/general`) for `allowed_email_domains`.
+- Implement read-only `GET /v1/zpools` and `GET /v1/zpools/{name}` (live pool status from `zpool status`).
 - Add tests.
 
 ### Phase 6: Integration Testing and Documentation
